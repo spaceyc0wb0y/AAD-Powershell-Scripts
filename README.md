@@ -9,32 +9,44 @@ The current script, `Get-EntraMfaDiagnostics.ps1`, collects user MFA information
 - Runs against one tenant or several tenants in one execution.
 - Pulls user inventory from Microsoft Graph.
 - Reports registered authentication methods for each user.
-- Optionally reports legacy per-user MFA state: `Disabled`, `Enabled`, or `Enforced`.
+- Reports per-user MFA state: `Disabled`, `Enabled`, or `Enforced`.
+- Clearly separates Graph MFA method registration from legacy MFA enforcement state.
 - Creates per-tenant reports and combined all-tenant reports.
 - Continues to the next tenant if one tenant fails, unless `-StopOnTenantError` is used.
 
 ## Requirements
 
-- Windows PowerShell or PowerShell 7+
+- PowerShell 7+ on macOS, Linux, or Windows.
 - Tenant admin permissions to consent to/read:
   - `User.Read.All`
   - `UserAuthenticationMethod.Read.All`
   - `Directory.Read.All`
+  - `Policy.Read.All`
 - Microsoft Graph PowerShell modules:
   - `Microsoft.Graph.Authentication`
   - `Microsoft.Graph.Users`
   - `Microsoft.Graph.Identity.SignIns`
-- Optional legacy MFA status support:
-  - `MSOnline`
 
 The script can install missing modules for the current user when run with `-InstallMissingModules`.
 
 ## Quick Start
 
-Run against one tenant:
+On macOS or Linux, run against one tenant:
+
+```powershell
+./Get-EntraMfaDiagnostics.ps1 -TenantId contoso.onmicrosoft.com
+```
+
+On Windows, run against one tenant:
 
 ```powershell
 .\Get-EntraMfaDiagnostics.ps1 -TenantId contoso.onmicrosoft.com
+```
+
+On first run, install missing Microsoft Graph modules for the current user:
+
+```powershell
+./Get-EntraMfaDiagnostics.ps1 -TenantId contoso.onmicrosoft.com -InstallMissingModules
 ```
 
 If the sign-in window does not open or the script appears to stop at the tenant banner, use device-code sign-in:
@@ -64,19 +76,18 @@ contoso.onmicrosoft.com
 fabrikam.onmicrosoft.com
 ```
 
-## Legacy Per-User MFA State
+## Per-User MFA State
 
-Microsoft Graph reports authentication methods registered by users. The exact values `Disabled`, `Enabled`, and `Enforced` are legacy per-user MFA states exposed by the `MSOnline` module.
+Microsoft Graph authentication methods show whether users have MFA-capable methods registered. That is not the same thing as whether per-user MFA is disabled, enabled, or enforced.
 
-To include those values:
+The script reads per-user MFA state from the Microsoft Graph beta authentication requirements endpoint. Microsoft documents this as `perUserMfaState` under `/users/{id}/authentication/requirements`. Because this endpoint is in Graph beta, Microsoft notes that the API is subject to change.
 
-```powershell
-.\Get-EntraMfaDiagnostics.ps1 `
-  -TenantListPath .\tenants.txt `
-  -IncludeLegacyPerUserMfaStatus
-```
+This state is the per-user MFA state. Conditional Access policies and security defaults can require MFA without changing a user's per-user MFA state.
 
-When prompted for MSOnline, sign in with an admin account for the tenant being processed.
+The detail CSV always includes `MfaEnforcementStatus`:
+
+- `Disabled`, `Enabled`, or `Enforced` is the per-user MFA state returned by Microsoft Graph.
+- `Unknown` means the state could not be read. Check `MfaEnforcementReadError` for the reason.
 
 ## Output
 
@@ -90,12 +101,16 @@ Each tenant gets its own folder containing:
 
 - `EntraMfaDiagnostics-<tenant>-<timestamp>.csv`
 - `EntraMfaDiagnostics-Summary-<tenant>-<timestamp>.csv`
+- `EntraMfaDiagnostics-MfaStatus-<tenant>-<timestamp>.csv`
 
 The root output folder also contains combined reports:
 
 - `EntraMfaDiagnostics-AllTenants-<timestamp>.csv`
 - `EntraMfaDiagnostics-Summary-AllTenants-<timestamp>.csv`
+- `EntraMfaDiagnostics-MfaStatus-AllTenants-<timestamp>.csv`
 - `EntraMfaDiagnostics-TenantErrors-<timestamp>.csv`, only when failures occur
+
+The MFA status report is sorted by `MfaEnforcementStatus` and `UserPrincipalName`, so the `Disabled`, `Enabled`, `Enforced`, and `Unknown` users are grouped together with their registered authentication method details.
 
 ## Useful Parameters
 
@@ -105,7 +120,7 @@ The root output folder also contains combined reports:
 | `-TenantListPath` | Text file with one tenant per line. Lines beginning with `#` are ignored. |
 | `-UserPrincipalName` | Optional list of specific users to inspect. |
 | `-OutputPath` | Custom report output folder. |
-| `-IncludeLegacyPerUserMfaStatus` | Adds legacy `Disabled`/`Enabled`/`Enforced` MFA state. |
+| `-IncludeLegacyPerUserMfaStatus` | Deprecated compatibility switch. Per-user MFA state is collected by default with Microsoft Graph. |
 | `-InstallMissingModules` | Installs required modules for the current user. |
 | `-StopOnTenantError` | Stops the run when a tenant fails. |
 | `-UseDeviceAuthentication` | Uses device-code sign-in when browser sign-in hangs or is unavailable. |

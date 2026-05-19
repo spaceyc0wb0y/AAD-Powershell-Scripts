@@ -1,16 +1,17 @@
+#!/usr/bin/env pwsh
+
 <#
 .SYNOPSIS
 Runs Entra ID user MFA diagnostics for one or more tenants.
 
 .DESCRIPTION
-Exports user inventory with Microsoft Graph authentication methods and, optionally,
-legacy per-user MFA status values: Disabled, Enabled, or Enforced.
+Exports user inventory with Microsoft Graph authentication methods and per-user
+MFA status values: Disabled, Enabled, or Enforced.
 
 Important:
 - Microsoft Graph reports registered authentication methods.
-- The exact per-user MFA values Enabled/Disabled/Enforced are legacy values from
-  the MSOnline module. Use -IncludeLegacyPerUserMfaStatus to collect them when
-  the tenant still exposes those values.
+- The exact per-user MFA values Enabled/Disabled/Enforced are collected from
+  the Microsoft Graph beta authentication requirements endpoint.
 
 .PARAMETER TenantId
 One or more tenant IDs or verified tenant domains to connect to.
@@ -25,10 +26,11 @@ Folder where CSV output files will be written.
 Optional list of UPNs to inspect. If omitted, all users are inspected.
 
 .PARAMETER IncludeLegacyPerUserMfaStatus
-Also collect legacy per-user MFA state with Get-MsolUser.
+Deprecated compatibility switch. Per-user MFA state is collected with Microsoft
+Graph by default.
 
 .PARAMETER InstallMissingModules
-Install missing Microsoft Graph/MSOnline modules for the current user.
+Install missing Microsoft Graph modules for the current user.
 
 .PARAMETER StopOnTenantError
 Stop the full run if one tenant fails. By default, the script logs the error and
@@ -42,7 +44,10 @@ browser-based sign-in does not open or appears to hang.
 .\Get-EntraMfaDiagnostics.ps1 -TenantId contoso.onmicrosoft.com
 
 .EXAMPLE
-.\Get-EntraMfaDiagnostics.ps1 -TenantId contoso.onmicrosoft.com,fabrikam.onmicrosoft.com -IncludeLegacyPerUserMfaStatus -OutputPath C:\Temp\MfaReport
+./Get-EntraMfaDiagnostics.ps1 -TenantId contoso.onmicrosoft.com -InstallMissingModules
+
+.EXAMPLE
+.\Get-EntraMfaDiagnostics.ps1 -TenantId contoso.onmicrosoft.com,fabrikam.onmicrosoft.com -OutputPath C:\Temp\MfaReport
 
 .EXAMPLE
 .\Get-EntraMfaDiagnostics.ps1 -TenantListPath .\tenants.txt -OutputPath C:\Temp\MfaReport
@@ -73,6 +78,26 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+function ConvertTo-DisplayMfaState {
+    param(
+        [string]$State
+    )
+
+    switch ($State) {
+        "disabled" { return "Disabled" }
+        "enabled" { return "Enabled" }
+        "enforced" { return "Enforced" }
+        "unknownFutureValue" { return "UnknownFutureValue" }
+        default {
+            if ([string]::IsNullOrWhiteSpace($State)) {
+                return "Unknown"
+            }
+
+            return $State
+        }
+    }
+}
+
 function Assert-Module {
     param(
         [Parameter(Mandatory)]
@@ -88,7 +113,11 @@ function Assert-Module {
     }
 
     if (-not $Install) {
-        throw "Required module '$Name' is not installed. Re-run with -InstallMissingModules or install it with: Install-Module $Name -Scope CurrentUser"
+        throw "Required module '$Name' is not installed. Re-run this script with -InstallMissingModules or install it first with: Install-Module $Name -Scope CurrentUser"
+    }
+
+    if (-not (Get-Command -Name Install-Module -ErrorAction SilentlyContinue)) {
+        throw "Install-Module is not available in this PowerShell session. Install PowerShellGet, then install '$Name' with: Install-Module $Name -Scope CurrentUser"
     }
 
     Write-Host "Installing module $Name for CurrentUser..."
@@ -176,54 +205,6 @@ function Get-SafeFileName {
     return ($Value -replace '[\\/:*?"<>|]', "_" -replace "\s+", "_")
 }
 
-function Get-LegacyMfaStateByUpn {
-    param(
-        [Parameter(Mandatory)]
-        [string]$TenantId,
-
-        [string[]]$RequestedUpns
-    )
-
-    Assert-Module -Name MSOnline -Install:$InstallMissingModules
-    Import-Module MSOnline
-
-    Write-Host "Connecting to MSOnline for legacy per-user MFA state..."
-    Connect-MsolService
-
-    $legacyUsers = if ($RequestedUpns -and $RequestedUpns.Count -gt 0) {
-        foreach ($upn in $RequestedUpns) {
-            Get-MsolUser -UserPrincipalName $upn
-        }
-    }
-    else {
-        Get-MsolUser -All
-    }
-
-    $stateByUpn = @{}
-
-    foreach ($legacyUser in $legacyUsers) {
-        $state = "Disabled"
-
-        if ($legacyUser.StrongAuthenticationRequirements -and $legacyUser.StrongAuthenticationRequirements.Count -gt 0) {
-            $requirement = $legacyUser.StrongAuthenticationRequirements |
-                Where-Object { $_.RelyingParty -eq "*" } |
-                Select-Object -First 1
-
-            if (-not $requirement) {
-                $requirement = $legacyUser.StrongAuthenticationRequirements | Select-Object -First 1
-            }
-
-            if ($requirement.State) {
-                $state = [string]$requirement.State
-            }
-        }
-
-        $stateByUpn[[string]$legacyUser.UserPrincipalName] = $state
-    }
-
-    return $stateByUpn
-}
-
 function Connect-EntraGraph {
     param(
         [Parameter(Mandatory)]
@@ -244,7 +225,8 @@ function Connect-EntraGraph {
     $scopes = @(
         "User.Read.All",
         "UserAuthenticationMethod.Read.All",
-        "Directory.Read.All"
+        "Directory.Read.All",
+        "Policy.Read.All"
     )
 
     Write-Host "Connecting to Microsoft Graph tenant $TenantId..."
@@ -267,6 +249,75 @@ function Connect-EntraGraph {
     }
 
     Write-Host "Connected to Microsoft Graph as $($context.Account) in tenant $($context.TenantId)."
+}
+
+function Get-GraphPerUserMfaState {
+    param(
+        [Parameter(Mandatory)]
+        [string]$UserId
+    )
+
+    try {
+        $requirements = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/beta/users/$UserId/authentication/requirements"
+
+        [pscustomobject]@{
+            State = ConvertTo-DisplayMfaState -State $requirements.perUserMfaState
+            Error = $null
+        }
+    }
+    catch {
+        [pscustomobject]@{
+            State = "Unknown"
+            Error = $_.Exception.Message
+        }
+    }
+}
+
+function Select-MfaStatusDetail {
+    param(
+        [Parameter(Mandatory, ValueFromPipeline)]
+        [object]$Diagnostic
+    )
+
+    process {
+        [pscustomobject]@{
+            TenantId                = $Diagnostic.TenantId
+            MfaEnforcementStatus    = $Diagnostic.MfaEnforcementStatus
+            UserPrincipalName       = $Diagnostic.UserPrincipalName
+            DisplayName             = $Diagnostic.DisplayName
+            Mail                    = $Diagnostic.Mail
+            AccountEnabled          = $Diagnostic.AccountEnabled
+            UserType                = $Diagnostic.UserType
+            GraphMfaRegistered      = $Diagnostic.GraphMfaRegistered
+            GraphMfaMethodCount     = $Diagnostic.GraphMfaMethodCount
+            GraphMfaMethods         = $Diagnostic.GraphMfaMethods
+            GraphAllAuthMethods     = $Diagnostic.GraphAllAuthMethods
+            MfaEnforcementReadError = $Diagnostic.MfaEnforcementReadError
+            AuthenticationReadError = $Diagnostic.AuthenticationReadError
+        }
+    }
+}
+
+function Write-MfaStatusGroups {
+    param(
+        [Parameter(Mandatory)]
+        [object[]]$Results
+    )
+
+    foreach ($status in @("Enforced", "Enabled", "Disabled", "Unknown")) {
+        $statusResults = @($Results | Where-Object { $_.MfaEnforcementStatus -eq $status } | Sort-Object UserPrincipalName)
+
+        Write-Host ""
+        Write-Host "MFA enforcement status: $status ($($statusResults.Count))"
+
+        if ($statusResults.Count -eq 0) {
+            continue
+        }
+
+        $statusResults |
+            Select-Object UserPrincipalName, DisplayName, AccountEnabled, GraphMfaRegistered, GraphMfaMethods, MfaEnforcementReadError |
+            Format-Table -AutoSize
+    }
 }
 
 function Get-EntraUsers {
@@ -300,9 +351,7 @@ function Get-UserAuthenticationDiagnostics {
         [string]$TenantId,
 
         [Parameter(Mandatory)]
-        [object]$User,
-
-        [hashtable]$LegacyMfaStateByUpn
+        [object]$User
     )
 
     $methods = @()
@@ -317,11 +366,13 @@ function Get-UserAuthenticationDiagnostics {
 
     $methodTypes = @($methods | ForEach-Object { Get-MethodTypeName -Method $_ } | Sort-Object -Unique)
     $mfaMethodTypes = @($methodTypes | Where-Object { Test-IsMfaMethod -MethodType $_ })
-    $legacyState = $null
+    $mfaState = "Unknown"
+    $mfaStateSource = "MicrosoftGraphBeta"
+    $mfaStateError = $null
 
-    if ($LegacyMfaStateByUpn -and $LegacyMfaStateByUpn.ContainsKey([string]$User.UserPrincipalName)) {
-        $legacyState = $LegacyMfaStateByUpn[[string]$User.UserPrincipalName]
-    }
+    $mfaStateResult = Get-GraphPerUserMfaState -UserId $User.Id
+    $mfaState = $mfaStateResult.State
+    $mfaStateError = $mfaStateResult.Error
 
     [pscustomobject]@{
         TenantId                = $TenantId
@@ -331,7 +382,9 @@ function Get-UserAuthenticationDiagnostics {
         AccountEnabled          = $User.AccountEnabled
         UserType                = $User.UserType
         CreatedDateTime         = $User.CreatedDateTime
-        LegacyPerUserMfaState   = $legacyState
+        MfaEnforcementStatus    = $mfaState
+        MfaEnforcementSource    = $mfaStateSource
+        MfaEnforcementReadError = $mfaStateError
         GraphMfaRegistered      = ($mfaMethodTypes.Count -gt 0)
         GraphMfaMethodCount     = $mfaMethodTypes.Count
         GraphMfaMethods         = ($mfaMethodTypes -join ";")
@@ -341,6 +394,10 @@ function Get-UserAuthenticationDiagnostics {
 }
 
 New-Item -Path $OutputPath -ItemType Directory -Force | Out-Null
+
+if ($IncludeLegacyPerUserMfaStatus) {
+    Write-Warning "-IncludeLegacyPerUserMfaStatus is no longer required for Disabled/Enabled/Enforced. The script collects per-user MFA state with Microsoft Graph by default."
+}
 
 $tenants = @(Get-TenantInputs -TenantIds $TenantId -ListPath $TenantListPath)
 $timestamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -353,6 +410,7 @@ foreach ($tenant in $tenants) {
     $tenantOutputPath = Join-Path -Path $OutputPath -ChildPath $safeTenantName
     $detailPath = Join-Path -Path $tenantOutputPath -ChildPath "EntraMfaDiagnostics-$safeTenantName-$timestamp.csv"
     $summaryPath = Join-Path -Path $tenantOutputPath -ChildPath "EntraMfaDiagnostics-Summary-$safeTenantName-$timestamp.csv"
+    $statusDetailPath = Join-Path -Path $tenantOutputPath -ChildPath "EntraMfaDiagnostics-MfaStatus-$safeTenantName-$timestamp.csv"
 
     New-Item -Path $tenantOutputPath -ItemType Directory -Force | Out-Null
 
@@ -361,12 +419,6 @@ foreach ($tenant in $tenants) {
         Write-Host "===== Tenant: $tenant ====="
 
         Connect-EntraGraph -TenantId $tenant
-
-        $legacyMfaStateByUpn = @{}
-        if ($IncludeLegacyPerUserMfaStatus) {
-            Write-Warning "MSOnline does not support the same tenant-targeted connection model as Graph. When prompted, sign in with an admin account for tenant '$tenant'."
-            $legacyMfaStateByUpn = Get-LegacyMfaStateByUpn -TenantId $tenant -RequestedUpns $UserPrincipalName
-        }
 
         Write-Host "Collecting users for tenant $tenant..."
         $users = @(Get-EntraUsers -RequestedUpns $UserPrincipalName)
@@ -377,7 +429,7 @@ foreach ($tenant in $tenants) {
         foreach ($user in $users) {
             $index++
             Write-Progress -Activity "Collecting MFA diagnostics for $tenant" -Status $user.UserPrincipalName -PercentComplete (($index / [Math]::Max($users.Count, 1)) * 100)
-            $diagnostic = Get-UserAuthenticationDiagnostics -TenantId $tenant -User $user -LegacyMfaStateByUpn $legacyMfaStateByUpn
+            $diagnostic = Get-UserAuthenticationDiagnostics -TenantId $tenant -User $user
             $results.Add($diagnostic)
             $allResults.Add($diagnostic)
         }
@@ -388,18 +440,22 @@ foreach ($tenant in $tenants) {
             Sort-Object UserPrincipalName |
             Export-Csv -Path $detailPath -NoTypeInformation -Encoding UTF8
 
+        $results |
+            Sort-Object MfaEnforcementStatus, UserPrincipalName |
+            Select-MfaStatusDetail |
+            Export-Csv -Path $statusDetailPath -NoTypeInformation -Encoding UTF8
+
         $summary = @(
             [pscustomobject]@{ TenantId = $tenant; Metric = "TotalUsers"; Count = $results.Count }
+            [pscustomobject]@{ TenantId = $tenant; Metric = "MfaEnforcementStatusDisabled"; Count = @($results | Where-Object { $_.MfaEnforcementStatus -eq "Disabled" }).Count }
+            [pscustomobject]@{ TenantId = $tenant; Metric = "MfaEnforcementStatusEnabled"; Count = @($results | Where-Object { $_.MfaEnforcementStatus -eq "Enabled" }).Count }
+            [pscustomobject]@{ TenantId = $tenant; Metric = "MfaEnforcementStatusEnforced"; Count = @($results | Where-Object { $_.MfaEnforcementStatus -eq "Enforced" }).Count }
+            [pscustomobject]@{ TenantId = $tenant; Metric = "MfaEnforcementStatusUnknown"; Count = @($results | Where-Object { $_.MfaEnforcementStatus -eq "Unknown" }).Count }
             [pscustomobject]@{ TenantId = $tenant; Metric = "GraphMfaRegistered"; Count = @($results | Where-Object { $_.GraphMfaRegistered }).Count }
             [pscustomobject]@{ TenantId = $tenant; Metric = "GraphMfaNotRegistered"; Count = @($results | Where-Object { -not $_.GraphMfaRegistered }).Count }
+            [pscustomobject]@{ TenantId = $tenant; Metric = "MfaEnforcementReadErrors"; Count = @($results | Where-Object { $_.MfaEnforcementReadError }).Count }
             [pscustomobject]@{ TenantId = $tenant; Metric = "AuthenticationReadErrors"; Count = @($results | Where-Object { $_.AuthenticationReadError }).Count }
         )
-
-        if ($IncludeLegacyPerUserMfaStatus) {
-            $summary += [pscustomobject]@{ TenantId = $tenant; Metric = "LegacyPerUserMfaDisabled"; Count = @($results | Where-Object { $_.LegacyPerUserMfaState -eq "Disabled" }).Count }
-            $summary += [pscustomobject]@{ TenantId = $tenant; Metric = "LegacyPerUserMfaEnabled"; Count = @($results | Where-Object { $_.LegacyPerUserMfaState -eq "Enabled" }).Count }
-            $summary += [pscustomobject]@{ TenantId = $tenant; Metric = "LegacyPerUserMfaEnforced"; Count = @($results | Where-Object { $_.LegacyPerUserMfaState -eq "Enforced" }).Count }
-        }
 
         $summary | Export-Csv -Path $summaryPath -NoTypeInformation -Encoding UTF8
         foreach ($summaryRow in $summary) {
@@ -409,7 +465,9 @@ foreach ($tenant in $tenants) {
         Write-Host "Tenant complete: $tenant"
         Write-Host "Detail report:  $detailPath"
         Write-Host "Summary report: $summaryPath"
+        Write-Host "MFA status report: $statusDetailPath"
         $summary | Format-Table -AutoSize
+        Write-MfaStatusGroups -Results $results
     }
     catch {
         Write-Warning "Tenant '$tenant' failed: $($_.Exception.Message)"
@@ -435,12 +493,18 @@ foreach ($tenant in $tenants) {
 
 $combinedDetailPath = Join-Path -Path $OutputPath -ChildPath "EntraMfaDiagnostics-AllTenants-$timestamp.csv"
 $combinedSummaryPath = Join-Path -Path $OutputPath -ChildPath "EntraMfaDiagnostics-Summary-AllTenants-$timestamp.csv"
+$combinedStatusDetailPath = Join-Path -Path $OutputPath -ChildPath "EntraMfaDiagnostics-MfaStatus-AllTenants-$timestamp.csv"
 $tenantErrorsPath = Join-Path -Path $OutputPath -ChildPath "EntraMfaDiagnostics-TenantErrors-$timestamp.csv"
 
 if ($allResults.Count -gt 0) {
     $allResults |
         Sort-Object TenantId, UserPrincipalName |
         Export-Csv -Path $combinedDetailPath -NoTypeInformation -Encoding UTF8
+
+    $allResults |
+        Sort-Object TenantId, MfaEnforcementStatus, UserPrincipalName |
+        Select-MfaStatusDetail |
+        Export-Csv -Path $combinedStatusDetailPath -NoTypeInformation -Encoding UTF8
 }
 
 if ($allSummary.Count -gt 0) {
@@ -459,6 +523,7 @@ Write-Host "Tenants requested: $($tenants.Count)"
 Write-Host "Tenants failed:    $($tenantErrors.Count)"
 Write-Host "Combined detail:   $combinedDetailPath"
 Write-Host "Combined summary:  $combinedSummaryPath"
+Write-Host "Combined MFA status: $combinedStatusDetailPath"
 
 if ($tenantErrors.Count -gt 0) {
     Write-Host "Tenant errors:     $tenantErrorsPath"
