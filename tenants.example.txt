@@ -1,0 +1,4 @@
+# One tenant ID or verified domain per line.
+# Lines starting with # are ignored.
+contoso.onmicrosoft.com
+fabrikam.onmicrosoft.com

@@ -1,0 +1,57 @@
+# Generated Entra/Azure AD diagnostic output
+EntraMfaDiagnostics/
+**/EntraMfaDiagnostics/
+*.csv
+*.xlsx
+*.json
+*.log
+
+# Tenant/customer input files
+tenants.txt
+tenant*.txt
+customers.txt
+clients.txt
+!tenants.example.txt
+
+# Secrets and local configuration
+.env
+.env.*
+*.secret
+*.secrets
+*.key
+*.pem
+*.pfx
+*.cer
+*.cred
+*.credential
+*.credentials
+*.token
+
+# PowerShell module/test artifacts
+bin/
+obj/
+TestResults/
+coverage/
+*.ps1xml
+*.psm1.tmp
+*.psd1.tmp
+Pester.xml
+coverage.xml
+
+# PowerShell transcript and history files
+PowerShell_transcript.*
+ConsoleHost_history.txt
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Codex/local agent workspace metadata
+.codex/
+.agents/
