@@ -2,11 +2,15 @@
 
 <#
 .SYNOPSIS
-Runs Entra ID user MFA diagnostics for one or more tenants.
+Runs Entra ID user MFA diagnostics and optional per-user MFA remediation for one or more tenants.
 
 .DESCRIPTION
 Exports user inventory with Microsoft Graph authentication methods and per-user
 MFA status values: Disabled, Enabled, or Enforced.
+
+Optionally updates non-Global Administrator users whose per-user MFA state is
+below a requested target state. Global Administrators are always skipped for
+remediation.
 
 Important:
 - Microsoft Graph reports registered authentication methods.
@@ -40,6 +44,18 @@ continues to the next tenant.
 Use device-code authentication for Microsoft Graph sign-in. This is useful when
 browser-based sign-in does not open or appears to hang.
 
+.PARAMETER RemediateMfaState
+Optional per-user MFA target state to apply to non-Global Administrator users.
+When set to Enabled, users currently Disabled are updated. When set to Enforced,
+users currently Disabled or Enabled are updated.
+
+.PARAMETER PreviewRemediation
+Report which users would be remediated without updating Microsoft Graph.
+
+.PARAMETER IncludeDisabledAccountsForRemediation
+Include disabled user accounts in MFA remediation. By default, disabled accounts
+are reported but skipped by remediation.
+
 .EXAMPLE
 .\Get-EntraMfaDiagnostics.ps1 -TenantId contoso.onmicrosoft.com
 
@@ -54,9 +70,15 @@ browser-based sign-in does not open or appears to hang.
 
 .EXAMPLE
 .\Get-EntraMfaDiagnostics.ps1 -TenantId contoso.onmicrosoft.com -UseDeviceAuthentication
+
+.EXAMPLE
+.\Get-EntraMfaDiagnostics.ps1 -TenantId contoso.onmicrosoft.com -RemediateMfaState Enforced -WhatIf
+
+.EXAMPLE
+.\Get-EntraMfaDiagnostics.ps1 -TenantId contoso.onmicrosoft.com -RemediateMfaState Enforced -PreviewRemediation
 #>
 
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess, ConfirmImpact = "High")]
 param(
     [string[]]$TenantId,
 
@@ -72,7 +94,14 @@ param(
 
     [switch]$StopOnTenantError,
 
-    [switch]$UseDeviceAuthentication
+    [switch]$UseDeviceAuthentication,
+
+    [ValidateSet("Enabled", "Enforced")]
+    [string]$RemediateMfaState,
+
+    [switch]$PreviewRemediation,
+
+    [switch]$IncludeDisabledAccountsForRemediation
 )
 
 Set-StrictMode -Version Latest
@@ -226,8 +255,13 @@ function Connect-EntraGraph {
         "User.Read.All",
         "UserAuthenticationMethod.Read.All",
         "Directory.Read.All",
-        "Policy.Read.All"
+        "Policy.Read.All",
+        "RoleManagement.Read.Directory"
     )
+
+    if (-not [string]::IsNullOrWhiteSpace($RemediateMfaState)) {
+        $scopes += "Policy.ReadWrite.AuthenticationMethod"
+    }
 
     Write-Host "Connecting to Microsoft Graph tenant $TenantId..."
 
@@ -249,6 +283,143 @@ function Connect-EntraGraph {
     }
 
     Write-Host "Connected to Microsoft Graph as $($context.Account) in tenant $($context.TenantId)."
+}
+
+function Invoke-GraphPagedRequest {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Uri
+    )
+
+    $items = New-Object System.Collections.Generic.List[object]
+    $nextUri = $Uri
+
+    while (-not [string]::IsNullOrWhiteSpace($nextUri)) {
+        $response = Invoke-MgGraphRequest -Method GET -Uri $nextUri
+
+        $responseValue = Get-ObjectPropertyValue -InputObject $response -Name "value"
+        if ($responseValue) {
+            foreach ($item in $responseValue) {
+                $items.Add($item)
+            }
+        }
+        elseif ($response) {
+            $items.Add($response)
+        }
+
+        $nextUri = $null
+        $nextLink = Get-ObjectPropertyValue -InputObject $response -Name "@odata.nextLink"
+        if (-not [string]::IsNullOrWhiteSpace($nextLink)) {
+            $nextUri = $nextLink
+        }
+    }
+
+    return $items
+}
+
+function Get-ObjectPropertyValue {
+    param(
+        [Parameter(Mandatory)]
+        [object]$InputObject,
+
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    if ($InputObject -is [System.Collections.IDictionary]) {
+        foreach ($key in $InputObject.Keys) {
+            if ($key -eq $Name) {
+                return $InputObject[$key]
+            }
+        }
+    }
+
+    $property = $InputObject.PSObject.Properties |
+        Where-Object { $_.Name -eq $Name } |
+        Select-Object -First 1
+
+    if ($property) {
+        return $property.Value
+    }
+
+    return $null
+}
+
+function Get-GlobalAdministratorUserIds {
+    $globalAdminRoleTemplateId = "62e90394-69f5-4237-9190-012177145e10"
+    $globalAdminUserIds = New-Object "System.Collections.Generic.HashSet[string]"
+
+    $roleUri = "https://graph.microsoft.com/v1.0/directoryRoles?`$select=id,displayName,roleTemplateId"
+    $roles = @(
+        Invoke-GraphPagedRequest -Uri $roleUri |
+            Where-Object {
+                (Get-ObjectPropertyValue -InputObject $_ -Name "roleTemplateId") -eq $globalAdminRoleTemplateId -or
+                (Get-ObjectPropertyValue -InputObject $_ -Name "displayName") -eq "Global Administrator"
+            }
+    )
+
+    foreach ($role in $roles) {
+        $roleId = Get-ObjectPropertyValue -InputObject $role -Name "id"
+        if ([string]::IsNullOrWhiteSpace($roleId)) {
+            continue
+        }
+
+        $membersUri = "https://graph.microsoft.com/v1.0/directoryRoles/$roleId/members?`$select=id,userPrincipalName"
+        $members = @(Invoke-GraphPagedRequest -Uri $membersUri)
+
+        foreach ($member in $members) {
+            $memberId = Get-ObjectPropertyValue -InputObject $member -Name "id"
+            if (-not [string]::IsNullOrWhiteSpace($memberId)) {
+                [void]$globalAdminUserIds.Add($memberId)
+            }
+        }
+    }
+
+    if ($globalAdminUserIds.Count -gt 0) {
+        return ,$globalAdminUserIds
+    }
+
+    $roleDefinitionUri = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleDefinitions?`$select=id,displayName,templateId"
+    $roleDefinitions = @(
+        Invoke-GraphPagedRequest -Uri $roleDefinitionUri |
+            Where-Object {
+                (Get-ObjectPropertyValue -InputObject $_ -Name "templateId") -eq $globalAdminRoleTemplateId -or
+                (Get-ObjectPropertyValue -InputObject $_ -Name "displayName") -eq "Global Administrator"
+            }
+    )
+
+    $roleDefinitionIds = New-Object "System.Collections.Generic.HashSet[string]"
+
+    foreach ($roleDefinition in $roleDefinitions) {
+        $roleDefinitionId = Get-ObjectPropertyValue -InputObject $roleDefinition -Name "id"
+        if ([string]::IsNullOrWhiteSpace($roleDefinitionId)) {
+            continue
+        }
+
+        [void]$roleDefinitionIds.Add($roleDefinitionId)
+    }
+
+    if ($roleDefinitionIds.Count -eq 0) {
+        return ,$globalAdminUserIds
+    }
+
+    $assignmentUri = "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments?`$select=principalId,roleDefinitionId"
+    $assignments = @(
+        Invoke-GraphPagedRequest -Uri $assignmentUri |
+            Where-Object {
+                $roleDefinitionId = Get-ObjectPropertyValue -InputObject $_ -Name "roleDefinitionId"
+                -not [string]::IsNullOrWhiteSpace($roleDefinitionId) -and $roleDefinitionIds.Contains($roleDefinitionId)
+            }
+    )
+
+    foreach ($assignment in $assignments) {
+        $principalId = Get-ObjectPropertyValue -InputObject $assignment -Name "principalId"
+        if (-not [string]::IsNullOrWhiteSpace($principalId)) {
+            [void]$globalAdminUserIds.Add($principalId)
+        }
+    }
+
+    return ,$globalAdminUserIds
 }
 
 function Get-GraphPerUserMfaState {
@@ -273,6 +444,99 @@ function Get-GraphPerUserMfaState {
     }
 }
 
+function Test-MfaRemediationRequired {
+    param(
+        [Parameter(Mandatory)]
+        [string]$CurrentState,
+
+        [Parameter(Mandatory)]
+        [string]$TargetState
+    )
+
+    if ($TargetState -eq "Enabled") {
+        return ($CurrentState -eq "Disabled")
+    }
+
+    if ($TargetState -eq "Enforced") {
+        return ($CurrentState -in @("Disabled", "Enabled"))
+    }
+
+    return $false
+}
+
+function Set-GraphPerUserMfaState {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Diagnostic,
+
+        [Parameter(Mandatory)]
+        [string]$TargetState
+    )
+
+    if ($Diagnostic.IsGlobalAdministrator) {
+        return [pscustomobject]@{
+            Action = "Skipped"
+            Error  = $null
+            Reason = "GlobalAdministrator"
+        }
+    }
+
+    if (-not $IncludeDisabledAccountsForRemediation -and $Diagnostic.AccountEnabled -eq $false) {
+        return [pscustomobject]@{
+            Action = "Skipped"
+            Error  = $null
+            Reason = "AccountDisabled"
+        }
+    }
+
+    if (-not (Test-MfaRemediationRequired -CurrentState $Diagnostic.MfaEnforcementStatus -TargetState $TargetState)) {
+        return [pscustomobject]@{
+            Action = "NotRequired"
+            Error  = $null
+            Reason = $null
+        }
+    }
+
+    $body = @{
+        perUserMfaState = $TargetState.ToLowerInvariant()
+    } | ConvertTo-Json
+
+    $targetDescription = "$($Diagnostic.UserPrincipalName) per-user MFA state to $TargetState"
+
+    if ($PreviewRemediation) {
+        return [pscustomobject]@{
+            Action = "Preview"
+            Error  = $null
+            Reason = $null
+        }
+    }
+
+    if (-not $PSCmdlet.ShouldProcess($targetDescription, "Update Microsoft Graph authentication requirements")) {
+        return [pscustomobject]@{
+            Action = "WhatIf"
+            Error  = $null
+            Reason = $null
+        }
+    }
+
+    try {
+        Invoke-MgGraphRequest -Method PATCH -Uri "https://graph.microsoft.com/beta/users/$($Diagnostic.UserId)/authentication/requirements" -Body $body -ContentType "application/json" | Out-Null
+
+        return [pscustomobject]@{
+            Action = "Updated"
+            Error  = $null
+            Reason = $null
+        }
+    }
+    catch {
+        return [pscustomobject]@{
+            Action = "Failed"
+            Error  = $_.Exception.Message
+            Reason = $null
+        }
+    }
+}
+
 function Select-MfaStatusDetail {
     param(
         [Parameter(Mandatory, ValueFromPipeline)]
@@ -282,6 +546,7 @@ function Select-MfaStatusDetail {
     process {
         [pscustomobject]@{
             TenantId                = $Diagnostic.TenantId
+            IsGlobalAdministrator   = $Diagnostic.IsGlobalAdministrator
             MfaEnforcementStatus    = $Diagnostic.MfaEnforcementStatus
             UserPrincipalName       = $Diagnostic.UserPrincipalName
             DisplayName             = $Diagnostic.DisplayName
@@ -292,6 +557,10 @@ function Select-MfaStatusDetail {
             GraphMfaMethodCount     = $Diagnostic.GraphMfaMethodCount
             GraphMfaMethods         = $Diagnostic.GraphMfaMethods
             GraphAllAuthMethods     = $Diagnostic.GraphAllAuthMethods
+            RemediationTargetState  = $Diagnostic.RemediationTargetState
+            RemediationAction       = $Diagnostic.RemediationAction
+            RemediationSkippedReason = $Diagnostic.RemediationSkippedReason
+            RemediationError        = $Diagnostic.RemediationError
             MfaEnforcementReadError = $Diagnostic.MfaEnforcementReadError
             AuthenticationReadError = $Diagnostic.AuthenticationReadError
         }
@@ -315,7 +584,7 @@ function Write-MfaStatusGroups {
         }
 
         $statusResults |
-            Select-Object UserPrincipalName, DisplayName, AccountEnabled, GraphMfaRegistered, GraphMfaMethods, MfaEnforcementReadError |
+            Select-Object UserPrincipalName, DisplayName, AccountEnabled, IsGlobalAdministrator, GraphMfaRegistered, GraphMfaMethods, RemediationAction, RemediationSkippedReason, MfaEnforcementReadError |
             Format-Table -AutoSize
     }
 }
@@ -351,7 +620,10 @@ function Get-UserAuthenticationDiagnostics {
         [string]$TenantId,
 
         [Parameter(Mandatory)]
-        [object]$User
+        [object]$User,
+
+        [Parameter(Mandatory)]
+        [System.Collections.Generic.HashSet[string]]$GlobalAdministratorUserIds
     )
 
     $methods = @()
@@ -376,12 +648,14 @@ function Get-UserAuthenticationDiagnostics {
 
     [pscustomobject]@{
         TenantId                = $TenantId
+        UserId                  = $User.Id
         UserPrincipalName       = $User.UserPrincipalName
         DisplayName             = $User.DisplayName
         Mail                    = $User.Mail
         AccountEnabled          = $User.AccountEnabled
         UserType                = $User.UserType
         CreatedDateTime         = $User.CreatedDateTime
+        IsGlobalAdministrator   = $GlobalAdministratorUserIds.Contains($User.Id)
         MfaEnforcementStatus    = $mfaState
         MfaEnforcementSource    = $mfaStateSource
         MfaEnforcementReadError = $mfaStateError
@@ -389,6 +663,10 @@ function Get-UserAuthenticationDiagnostics {
         GraphMfaMethodCount     = $mfaMethodTypes.Count
         GraphMfaMethods         = ($mfaMethodTypes -join ";")
         GraphAllAuthMethods     = ($methodTypes -join ";")
+        RemediationTargetState  = $null
+        RemediationAction       = $null
+        RemediationSkippedReason = $null
+        RemediationError        = $null
         AuthenticationReadError = $methodErrors
     }
 }
@@ -397,6 +675,10 @@ New-Item -Path $OutputPath -ItemType Directory -Force | Out-Null
 
 if ($IncludeLegacyPerUserMfaStatus) {
     Write-Warning "-IncludeLegacyPerUserMfaStatus is no longer required for Disabled/Enabled/Enforced. The script collects per-user MFA state with Microsoft Graph by default."
+}
+
+if (-not [string]::IsNullOrWhiteSpace($RemediateMfaState)) {
+    Write-Warning "MFA remediation is enabled. Global Administrators will always be skipped. Use -PreviewRemediation or -WhatIf to preview write operations before applying changes."
 }
 
 $tenants = @(Get-TenantInputs -TenantIds $TenantId -ListPath $TenantListPath)
@@ -420,6 +702,12 @@ foreach ($tenant in $tenants) {
 
         Connect-EntraGraph -TenantId $tenant
 
+        Write-Host "Collecting Global Administrator exclusions for tenant $tenant..."
+        $globalAdministratorUserIds = Get-GlobalAdministratorUserIds
+        if (-not [string]::IsNullOrWhiteSpace($RemediateMfaState) -and $globalAdministratorUserIds.Count -eq 0) {
+            throw "No Global Administrator users were resolved for tenant $tenant. Remediation was not attempted because Global Administrators must remain untouched."
+        }
+
         Write-Host "Collecting users for tenant $tenant..."
         $users = @(Get-EntraUsers -RequestedUpns $UserPrincipalName)
 
@@ -429,7 +717,16 @@ foreach ($tenant in $tenants) {
         foreach ($user in $users) {
             $index++
             Write-Progress -Activity "Collecting MFA diagnostics for $tenant" -Status $user.UserPrincipalName -PercentComplete (($index / [Math]::Max($users.Count, 1)) * 100)
-            $diagnostic = Get-UserAuthenticationDiagnostics -TenantId $tenant -User $user
+            $diagnostic = Get-UserAuthenticationDiagnostics -TenantId $tenant -User $user -GlobalAdministratorUserIds $globalAdministratorUserIds
+
+            if (-not [string]::IsNullOrWhiteSpace($RemediateMfaState)) {
+                $remediationResult = Set-GraphPerUserMfaState -Diagnostic $diagnostic -TargetState $RemediateMfaState
+                $diagnostic.RemediationTargetState = $RemediateMfaState
+                $diagnostic.RemediationAction = $remediationResult.Action
+                $diagnostic.RemediationSkippedReason = $remediationResult.Reason
+                $diagnostic.RemediationError = $remediationResult.Error
+            }
+
             $results.Add($diagnostic)
             $allResults.Add($diagnostic)
         }
@@ -453,6 +750,12 @@ foreach ($tenant in $tenants) {
             [pscustomobject]@{ TenantId = $tenant; Metric = "MfaEnforcementStatusUnknown"; Count = @($results | Where-Object { $_.MfaEnforcementStatus -eq "Unknown" }).Count }
             [pscustomobject]@{ TenantId = $tenant; Metric = "GraphMfaRegistered"; Count = @($results | Where-Object { $_.GraphMfaRegistered }).Count }
             [pscustomobject]@{ TenantId = $tenant; Metric = "GraphMfaNotRegistered"; Count = @($results | Where-Object { -not $_.GraphMfaRegistered }).Count }
+            [pscustomobject]@{ TenantId = $tenant; Metric = "GlobalAdministratorsExcludedFromRemediation"; Count = @($results | Where-Object { $_.IsGlobalAdministrator }).Count }
+            [pscustomobject]@{ TenantId = $tenant; Metric = "RemediationUpdated"; Count = @($results | Where-Object { $_.RemediationAction -eq "Updated" }).Count }
+            [pscustomobject]@{ TenantId = $tenant; Metric = "RemediationPreview"; Count = @($results | Where-Object { $_.RemediationAction -eq "Preview" }).Count }
+            [pscustomobject]@{ TenantId = $tenant; Metric = "RemediationWhatIf"; Count = @($results | Where-Object { $_.RemediationAction -eq "WhatIf" }).Count }
+            [pscustomobject]@{ TenantId = $tenant; Metric = "RemediationSkipped"; Count = @($results | Where-Object { $_.RemediationAction -eq "Skipped" }).Count }
+            [pscustomobject]@{ TenantId = $tenant; Metric = "RemediationFailed"; Count = @($results | Where-Object { $_.RemediationAction -eq "Failed" }).Count }
             [pscustomobject]@{ TenantId = $tenant; Metric = "MfaEnforcementReadErrors"; Count = @($results | Where-Object { $_.MfaEnforcementReadError }).Count }
             [pscustomobject]@{ TenantId = $tenant; Metric = "AuthenticationReadErrors"; Count = @($results | Where-Object { $_.AuthenticationReadError }).Count }
         )

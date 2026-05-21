@@ -3,6 +3,7 @@
 PowerShell utilities for Microsoft Entra ID/Azure AD administration and diagnostics.
 
 The current script, `Get-EntraMfaDiagnostics.ps1`, collects user MFA information across one or more Entra tenants and exports CSV reports.
+It can also optionally remediate per-user MFA state for non-Global Administrator users.
 
 ## Features
 
@@ -13,6 +14,8 @@ The current script, `Get-EntraMfaDiagnostics.ps1`, collects user MFA information
 - Clearly separates Graph MFA method registration from legacy MFA enforcement state.
 - Creates per-tenant reports and combined all-tenant reports.
 - Continues to the next tenant if one tenant fails, unless `-StopOnTenantError` is used.
+- Optionally enables or enforces per-user MFA for users below the requested target state.
+- Always excludes Global Administrators from MFA remediation.
 
 ## Requirements
 
@@ -22,6 +25,9 @@ The current script, `Get-EntraMfaDiagnostics.ps1`, collects user MFA information
   - `UserAuthenticationMethod.Read.All`
   - `Directory.Read.All`
   - `Policy.Read.All`
+  - `RoleManagement.Read.Directory`
+- For MFA remediation, consent to/write:
+  - `Policy.ReadWrite.AuthenticationMethod`
 - Microsoft Graph PowerShell modules:
   - `Microsoft.Graph.Authentication`
   - `Microsoft.Graph.Users`
@@ -89,6 +95,38 @@ The detail CSV always includes `MfaEnforcementStatus`:
 - `Disabled`, `Enabled`, or `Enforced` is the per-user MFA state returned by Microsoft Graph.
 - `Unknown` means the state could not be read. Check `MfaEnforcementReadError` for the reason.
 
+## MFA Remediation
+
+By default, the script only reports. To change per-user MFA state, use `-RemediateMfaState Enabled` or `-RemediateMfaState Enforced`.
+
+Preview the changes first:
+
+```powershell
+.\Get-EntraMfaDiagnostics.ps1 `
+  -TenantId contoso.onmicrosoft.com `
+  -RemediateMfaState Enforced `
+  -PreviewRemediation
+```
+
+Apply the changes:
+
+```powershell
+.\Get-EntraMfaDiagnostics.ps1 `
+  -TenantId contoso.onmicrosoft.com `
+  -RemediateMfaState Enforced `
+  -Confirm:$false
+```
+
+Remediation behavior:
+
+- `Enabled` updates users currently `Disabled`.
+- `Enforced` updates users currently `Disabled` or `Enabled`.
+- Global Administrators are always skipped.
+- Disabled user accounts are skipped unless `-IncludeDisabledAccountsForRemediation` is supplied.
+- `Unknown` MFA states are reported but not remediated.
+
+Remediation results are written to the detail and MFA status CSVs with `RemediationTargetState`, `RemediationAction`, `RemediationSkippedReason`, and `RemediationError`.
+
 ## Output
 
 By default, reports are written to:
@@ -124,9 +162,15 @@ The MFA status report is sorted by `MfaEnforcementStatus` and `UserPrincipalName
 | `-InstallMissingModules` | Installs required modules for the current user. |
 | `-StopOnTenantError` | Stops the run when a tenant fails. |
 | `-UseDeviceAuthentication` | Uses device-code sign-in when browser sign-in hangs or is unavailable. |
+| `-RemediateMfaState` | Optional target state, `Enabled` or `Enforced`, for per-user MFA remediation. |
+| `-PreviewRemediation` | Reports which users would be remediated without applying MFA changes. |
+| `-IncludeDisabledAccountsForRemediation` | Includes disabled accounts in remediation. Disabled accounts are skipped by default. |
+| `-WhatIf` | Shows the per-user MFA changes that would be made without applying them. |
 
 ## Security Notes
 
 Generated reports contain sensitive user and authentication information. Do not commit report files, customer tenant lists, credentials, tokens, certificates, or production exports.
+
+Per-user MFA remediation uses the Microsoft Graph beta authentication requirements endpoint and changes tenant user security posture. Preview with `-PreviewRemediation` or `-WhatIf`, review the CSV output, and use a limited `-UserPrincipalName` scope before broad rollout.
 
 The `.gitignore` is configured to exclude common report outputs and local tenant files.
