@@ -53,8 +53,12 @@ users currently Disabled or Enabled are updated.
 Report which users would be remediated without updating Microsoft Graph.
 
 .PARAMETER IncludeDisabledAccountsForRemediation
-Include disabled user accounts in MFA remediation. By default, disabled accounts
-are reported but skipped by remediation.
+Deprecated compatibility switch. Disabled accounts are always ignored for
+remediation.
+
+.PARAMETER InteractiveMenu
+Start an interactive console menu with banner, scan options, and post-scan user
+selection for MFA remediation.
 
 .EXAMPLE
 .\Get-EntraMfaDiagnostics.ps1 -TenantId contoso.onmicrosoft.com
@@ -76,6 +80,9 @@ are reported but skipped by remediation.
 
 .EXAMPLE
 .\Get-EntraMfaDiagnostics.ps1 -TenantId contoso.onmicrosoft.com -RemediateMfaState Enforced -PreviewRemediation
+
+.EXAMPLE
+.\Get-EntraMfaDiagnostics.ps1 -InteractiveMenu
 #>
 
 [CmdletBinding(SupportsShouldProcess, ConfirmImpact = "High")]
@@ -101,7 +108,9 @@ param(
 
     [switch]$PreviewRemediation,
 
-    [switch]$IncludeDisabledAccountsForRemediation
+    [switch]$IncludeDisabledAccountsForRemediation,
+
+    [switch]$InteractiveMenu
 )
 
 Set-StrictMode -Version Latest
@@ -125,6 +134,90 @@ function ConvertTo-DisplayMfaState {
             return $State
         }
     }
+}
+
+function Show-HackerBanner {
+    Write-Host ""
+    Write-Host "0101010101010101010101010101010101010101010101010101010101010101010" -ForegroundColor DarkGreen
+    Write-Host "===================================================================" -ForegroundColor Green
+    Write-Host "   ____ _____ ____    _    ____     __  __ _____ _    " -ForegroundColor Green
+    Write-Host "  / ___| ____/ ___|  / \  |  _ \   |  \/  |  ___/ \   " -ForegroundColor Green
+    Write-Host " | |   |  _| \___ \ / _ \ | |_) |  | |\/| | |_ / _ \  " -ForegroundColor Green
+    Write-Host " | |___| |___ ___) / ___ \|  _ <   | |  | |  _/ ___ \ " -ForegroundColor Green
+    Write-Host "  \____|_____|____/_/   \_\_| \_\  |_|  |_|_|/_/   \_\" -ForegroundColor Green
+    Write-Host "                                                                   " -ForegroundColor DarkGreen
+    Write-Host "             CESAR RICARDO :: ENTRA MFA MATRIX CONSOLE             " -ForegroundColor Green
+    Write-Host "===================================================================" -ForegroundColor Green
+    Write-Host "0101010101010101010101010101010101010101010101010101010101010101010" -ForegroundColor DarkGreen
+    Write-Host ""
+}
+
+function Write-MatrixLine {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Message,
+
+        [ConsoleColor]$Color = [ConsoleColor]::Green
+    )
+
+    Write-Host $Message -ForegroundColor $Color
+}
+
+function Read-MatrixInput {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Prompt
+    )
+
+    Write-Host -NoNewline "$Prompt " -ForegroundColor Green
+    return Read-Host
+}
+
+function Read-CommaSeparatedValues {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Prompt
+    )
+
+    $value = Read-MatrixInput -Prompt $Prompt
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return @()
+    }
+
+    return @(
+        $value -split "," |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+}
+
+function Initialize-InteractiveOptions {
+    Show-HackerBanner
+
+    Write-MatrixLine "[BOOT] Interactive mode detected."
+    Write-MatrixLine "[SCAN] The console will run MFA diagnostics and write reports first."
+    Write-MatrixLine "[POST] After the scan, choose which eligible users to ENFORCE."
+    Write-MatrixLine "[SAFE] Global Administrators are never selectable."
+    Write-Host ""
+
+    $script:InteractiveRemediationTargetState = "Enforced"
+    $script:RemediateMfaState = "Enforced"
+
+    if (-not $TenantId -and [string]::IsNullOrWhiteSpace($TenantListPath)) {
+        $script:TenantId = @(Read-CommaSeparatedValues -Prompt "[INPUT] Tenant ID/domain(s), comma-separated")
+    }
+
+    $upns = @(Read-CommaSeparatedValues -Prompt "[INPUT] Optional UPN filter(s), comma-separated; press Enter for all users")
+    if ($upns.Count -gt 0) {
+        $script:UserPrincipalName = $upns
+    }
+
+    $deviceChoice = Read-MatrixInput -Prompt "[AUTH] Use device-code authentication? [y/N]"
+    if ($deviceChoice -match "^(y|yes)$") {
+        $script:UseDeviceAuthentication = $true
+    }
+
+    Write-MatrixLine "[SAFE] Disabled and unlicensed accounts are ignored for remediation."
 }
 
 function Assert-Module {
@@ -185,6 +278,20 @@ function Test-IsMfaMethod {
     )
 
     return ($nonMfaMethods -notcontains $MethodType)
+}
+
+function Test-UserHasAssignedLicense {
+    param(
+        [Parameter(Mandatory)]
+        [object]$User
+    )
+
+    $assignedLicenses = @(Get-ObjectPropertyValue -InputObject $User -Name "AssignedLicenses")
+    if ($assignedLicenses.Count -eq 0) {
+        $assignedLicenses = @(Get-ObjectPropertyValue -InputObject $User -Name "assignedLicenses")
+    }
+
+    return ($assignedLicenses.Count -gt 0)
 }
 
 function Get-TenantInputs {
@@ -481,11 +588,19 @@ function Set-GraphPerUserMfaState {
         }
     }
 
-    if (-not $IncludeDisabledAccountsForRemediation -and $Diagnostic.AccountEnabled -eq $false) {
+    if ($Diagnostic.AccountEnabled -eq $false) {
         return [pscustomobject]@{
             Action = "Skipped"
             Error  = $null
             Reason = "AccountDisabled"
+        }
+    }
+
+    if (-not $Diagnostic.IsLicensed) {
+        return [pscustomobject]@{
+            Action = "Skipped"
+            Error  = $null
+            Reason = "AccountUnlicensed"
         }
     }
 
@@ -537,6 +652,109 @@ function Set-GraphPerUserMfaState {
     }
 }
 
+function Get-EligibleMfaRemediationUsers {
+    param(
+        [Parameter(Mandatory)]
+        [object[]]$Results,
+
+        [Parameter(Mandatory)]
+        [string]$TargetState
+    )
+
+    return @(
+        $Results |
+            Where-Object {
+                -not $_.IsGlobalAdministrator -and
+                $_.AccountEnabled -ne $false -and
+                $_.IsLicensed -and
+                (Test-MfaRemediationRequired -CurrentState $_.MfaEnforcementStatus -TargetState $TargetState)
+            } |
+            Sort-Object UserPrincipalName
+    )
+}
+
+function Read-InteractiveUserSelection {
+    param(
+        [Parameter(Mandatory)]
+        [object[]]$EligibleUsers
+    )
+
+    if ($EligibleUsers.Count -eq 0) {
+        Write-MatrixLine "[CLEAR] No eligible users require enforcement."
+        return @()
+    }
+
+    Write-Host ""
+    Write-MatrixLine "[TARGETS] Users with per-user MFA Disabled or Enabled:"
+    for ($i = 0; $i -lt $EligibleUsers.Count; $i++) {
+        $user = $EligibleUsers[$i]
+        $number = $i + 1
+        Write-MatrixLine ("  [{0}] {1} :: {2} :: current={3}" -f $number, $user.UserPrincipalName, $user.DisplayName, $user.MfaEnforcementStatus)
+    }
+
+    Write-Host ""
+    Write-MatrixLine "[SELECT] Enter 'all', 'none', or comma-separated numbers such as 1,3,5."
+    $selection = Read-MatrixInput -Prompt "[ENFORCE]"
+
+    if ([string]::IsNullOrWhiteSpace($selection) -or $selection.Trim().ToLowerInvariant() -eq "none") {
+        return @()
+    }
+
+    if ($selection.Trim().ToLowerInvariant() -eq "all") {
+        return $EligibleUsers
+    }
+
+    $selectedUsers = New-Object System.Collections.Generic.List[object]
+    foreach ($token in ($selection -split ",")) {
+        $cleanToken = $token.Trim()
+        $selectedIndex = 0
+        if (-not [int]::TryParse($cleanToken, [ref]$selectedIndex)) {
+            Write-Warning "Ignoring invalid selection '$cleanToken'."
+            continue
+        }
+
+        if ($selectedIndex -lt 1 -or $selectedIndex -gt $EligibleUsers.Count) {
+            Write-Warning "Ignoring out-of-range selection '$cleanToken'."
+            continue
+        }
+
+        $selectedUsers.Add($EligibleUsers[$selectedIndex - 1])
+    }
+
+    return @($selectedUsers)
+}
+
+function Invoke-InteractiveMfaRemediation {
+    param(
+        [Parameter(Mandatory)]
+        [object[]]$Results,
+
+        [Parameter(Mandatory)]
+        [string]$TargetState
+    )
+
+    $eligibleUsers = @(Get-EligibleMfaRemediationUsers -Results $Results -TargetState $TargetState)
+
+    Write-Host ""
+    Write-MatrixLine "[POST-SCAN] MFA remediation target: $TargetState"
+    Write-MatrixLine "[SAFEGUARD] Global Administrators are not listed and cannot be selected." -Color Yellow
+
+    $selectedUsers = @(Read-InteractiveUserSelection -EligibleUsers $eligibleUsers)
+    if ($selectedUsers.Count -eq 0) {
+        Write-MatrixLine "[SKIP] No users selected for remediation."
+        return
+    }
+
+    foreach ($diagnostic in $selectedUsers) {
+        Write-MatrixLine ("[PATCH] {0} -> {1}" -f $diagnostic.UserPrincipalName, $TargetState)
+        $remediationResult = Set-GraphPerUserMfaState -Diagnostic $diagnostic -TargetState $TargetState
+        $diagnostic.RemediationTargetState = $TargetState
+        $diagnostic.RemediationAction = $remediationResult.Action
+        $diagnostic.RemediationSkippedReason = $remediationResult.Reason
+        $diagnostic.RemediationError = $remediationResult.Error
+    }
+}
+
 function Select-MfaStatusDetail {
     param(
         [Parameter(Mandatory, ValueFromPipeline)]
@@ -552,6 +770,7 @@ function Select-MfaStatusDetail {
             DisplayName             = $Diagnostic.DisplayName
             Mail                    = $Diagnostic.Mail
             AccountEnabled          = $Diagnostic.AccountEnabled
+            IsLicensed              = $Diagnostic.IsLicensed
             UserType                = $Diagnostic.UserType
             GraphMfaRegistered      = $Diagnostic.GraphMfaRegistered
             GraphMfaMethodCount     = $Diagnostic.GraphMfaMethodCount
@@ -584,7 +803,7 @@ function Write-MfaStatusGroups {
         }
 
         $statusResults |
-            Select-Object UserPrincipalName, DisplayName, AccountEnabled, IsGlobalAdministrator, GraphMfaRegistered, GraphMfaMethods, RemediationAction, RemediationSkippedReason, MfaEnforcementReadError |
+            Select-Object UserPrincipalName, DisplayName, AccountEnabled, IsLicensed, IsGlobalAdministrator, GraphMfaRegistered, GraphMfaMethods, RemediationAction, RemediationSkippedReason, MfaEnforcementReadError |
             Format-Table -AutoSize
     }
 }
@@ -601,7 +820,8 @@ function Get-EntraUsers {
         "mail",
         "accountEnabled",
         "userType",
-        "createdDateTime"
+        "createdDateTime",
+        "assignedLicenses"
     )
 
     if ($RequestedUpns -and $RequestedUpns.Count -gt 0) {
@@ -653,6 +873,7 @@ function Get-UserAuthenticationDiagnostics {
         DisplayName             = $User.DisplayName
         Mail                    = $User.Mail
         AccountEnabled          = $User.AccountEnabled
+        IsLicensed              = Test-UserHasAssignedLicense -User $User
         UserType                = $User.UserType
         CreatedDateTime         = $User.CreatedDateTime
         IsGlobalAdministrator   = $GlobalAdministratorUserIds.Contains($User.Id)
@@ -671,10 +892,24 @@ function Get-UserAuthenticationDiagnostics {
     }
 }
 
+$InteractiveRemediationTargetState = $null
+
+if (-not $InteractiveMenu -and -not $TenantId -and [string]::IsNullOrWhiteSpace($TenantListPath)) {
+    $InteractiveMenu = $true
+}
+
+if ($InteractiveMenu) {
+    Initialize-InteractiveOptions
+}
+
 New-Item -Path $OutputPath -ItemType Directory -Force | Out-Null
 
 if ($IncludeLegacyPerUserMfaStatus) {
     Write-Warning "-IncludeLegacyPerUserMfaStatus is no longer required for Disabled/Enabled/Enforced. The script collects per-user MFA state with Microsoft Graph by default."
+}
+
+if ($IncludeDisabledAccountsForRemediation) {
+    Write-Warning "-IncludeDisabledAccountsForRemediation is deprecated. Disabled accounts are always ignored for remediation."
 }
 
 if (-not [string]::IsNullOrWhiteSpace($RemediateMfaState)) {
@@ -719,7 +954,7 @@ foreach ($tenant in $tenants) {
             Write-Progress -Activity "Collecting MFA diagnostics for $tenant" -Status $user.UserPrincipalName -PercentComplete (($index / [Math]::Max($users.Count, 1)) * 100)
             $diagnostic = Get-UserAuthenticationDiagnostics -TenantId $tenant -User $user -GlobalAdministratorUserIds $globalAdministratorUserIds
 
-            if (-not [string]::IsNullOrWhiteSpace($RemediateMfaState)) {
+            if (-not $InteractiveMenu -and -not [string]::IsNullOrWhiteSpace($RemediateMfaState)) {
                 $remediationResult = Set-GraphPerUserMfaState -Diagnostic $diagnostic -TargetState $RemediateMfaState
                 $diagnostic.RemediationTargetState = $RemediateMfaState
                 $diagnostic.RemediationAction = $remediationResult.Action
@@ -732,6 +967,11 @@ foreach ($tenant in $tenants) {
         }
 
         Write-Progress -Activity "Collecting MFA diagnostics for $tenant" -Completed
+
+        if ($InteractiveMenu -and -not [string]::IsNullOrWhiteSpace($InteractiveRemediationTargetState)) {
+            Write-MfaStatusGroups -Results $results
+            Invoke-InteractiveMfaRemediation -Results $results -TargetState $InteractiveRemediationTargetState
+        }
 
         $results |
             Sort-Object UserPrincipalName |
@@ -750,6 +990,9 @@ foreach ($tenant in $tenants) {
             [pscustomobject]@{ TenantId = $tenant; Metric = "MfaEnforcementStatusUnknown"; Count = @($results | Where-Object { $_.MfaEnforcementStatus -eq "Unknown" }).Count }
             [pscustomobject]@{ TenantId = $tenant; Metric = "GraphMfaRegistered"; Count = @($results | Where-Object { $_.GraphMfaRegistered }).Count }
             [pscustomobject]@{ TenantId = $tenant; Metric = "GraphMfaNotRegistered"; Count = @($results | Where-Object { -not $_.GraphMfaRegistered }).Count }
+            [pscustomobject]@{ TenantId = $tenant; Metric = "LicensedUsers"; Count = @($results | Where-Object { $_.IsLicensed }).Count }
+            [pscustomobject]@{ TenantId = $tenant; Metric = "UnlicensedUsersIgnoredForRemediation"; Count = @($results | Where-Object { -not $_.IsLicensed }).Count }
+            [pscustomobject]@{ TenantId = $tenant; Metric = "DisabledUsersIgnoredForRemediation"; Count = @($results | Where-Object { $_.AccountEnabled -eq $false }).Count }
             [pscustomobject]@{ TenantId = $tenant; Metric = "GlobalAdministratorsExcludedFromRemediation"; Count = @($results | Where-Object { $_.IsGlobalAdministrator }).Count }
             [pscustomobject]@{ TenantId = $tenant; Metric = "RemediationUpdated"; Count = @($results | Where-Object { $_.RemediationAction -eq "Updated" }).Count }
             [pscustomobject]@{ TenantId = $tenant; Metric = "RemediationPreview"; Count = @($results | Where-Object { $_.RemediationAction -eq "Preview" }).Count }

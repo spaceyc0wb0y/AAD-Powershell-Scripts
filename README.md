@@ -37,6 +37,12 @@ The script can install missing modules for the current user when run with `-Inst
 
 ## Quick Start
 
+Start the interactive Matrix-style console by running the script without parameters. It scans and reports first, then asks which eligible users should be enforced:
+
+```powershell
+.\Get-EntraMfaDiagnostics.ps1
+```
+
 On macOS or Linux, run against one tenant:
 
 ```powershell
@@ -99,6 +105,14 @@ The detail CSV always includes `MfaEnforcementStatus`:
 
 By default, the script only reports. To change per-user MFA state, use `-RemediateMfaState Enabled` or `-RemediateMfaState Enforced`.
 
+For an interactive flow with the green console banner, scan results, and a post-scan enforcement picker, run:
+
+```powershell
+.\Get-EntraMfaDiagnostics.ps1 -InteractiveMenu
+```
+
+Interactive remediation scans and displays the report first, then lists only eligible licensed, enabled, non-Global Administrator users whose per-user MFA state is `Disabled` or `Enabled`. Choose `all`, `none`, or comma-separated row numbers to decide who gets enforced.
+
 Preview the changes first:
 
 ```powershell
@@ -122,7 +136,7 @@ Remediation behavior:
 - `Enabled` updates users currently `Disabled`.
 - `Enforced` updates users currently `Disabled` or `Enabled`.
 - Global Administrators are always skipped.
-- Disabled user accounts are skipped unless `-IncludeDisabledAccountsForRemediation` is supplied.
+- Disabled and unlicensed user accounts are always ignored for remediation.
 - `Unknown` MFA states are reported but not remediated.
 
 Remediation results are written to the detail and MFA status CSVs with `RemediationTargetState`, `RemediationAction`, `RemediationSkippedReason`, and `RemediationError`.
@@ -164,13 +178,14 @@ The MFA status report is sorted by `MfaEnforcementStatus` and `UserPrincipalName
 | `-UseDeviceAuthentication` | Uses device-code sign-in when browser sign-in hangs or is unavailable. |
 | `-RemediateMfaState` | Optional target state, `Enabled` or `Enforced`, for per-user MFA remediation. |
 | `-PreviewRemediation` | Reports which users would be remediated without applying MFA changes. |
-| `-IncludeDisabledAccountsForRemediation` | Includes disabled accounts in remediation. Disabled accounts are skipped by default. |
+| `-IncludeDisabledAccountsForRemediation` | Deprecated compatibility switch. Disabled accounts are always ignored for remediation. |
+| `-InteractiveMenu` | Starts the old-school console menu and post-scan user picker. |
 | `-WhatIf` | Shows the per-user MFA changes that would be made without applying them. |
 
 ## Security Notes
 
 Generated reports contain sensitive user and authentication information. Do not commit report files, customer tenant lists, credentials, tokens, certificates, or production exports.
 
-Per-user MFA remediation uses the Microsoft Graph beta authentication requirements endpoint and changes tenant user security posture. Preview with `-PreviewRemediation` or `-WhatIf`, review the CSV output, and use a limited `-UserPrincipalName` scope before broad rollout.
+Per-user MFA remediation uses the Microsoft Graph beta authentication requirements endpoint and changes tenant user security posture. Disabled and unlicensed accounts are ignored for remediation. Preview with `-PreviewRemediation` or `-WhatIf`, review the CSV output, and use a limited `-UserPrincipalName` scope before broad rollout.
 
 The `.gitignore` is configured to exclude common report outputs and local tenant files.
