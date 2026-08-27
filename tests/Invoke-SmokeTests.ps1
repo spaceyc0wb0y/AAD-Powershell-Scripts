@@ -270,6 +270,36 @@ Test-Case -Name "Export-AkCsv handles an empty collection" {
     }
 }
 
+Test-Case -Name "No call site wraps a comma-returning helper in @()" {
+    # These helpers return ,@($items) so an empty result survives as an array.
+    # Wrapping such a call in @() does not flatten it, it nests it one level
+    # deeper: @(f) becomes a one-element array holding the real array, and the
+    # first .Count or [0] downstream is then wrong. Caught in the wild when
+    # $users = @(Invoke-AkAdPropertyQuery ...) made every user record an array.
+    # Line-based, so a call split across lines is not inspected; a pipeline on
+    # the same line is fine because piping enumerates the array.
+    $commaReturning = @("Import-AkCsv", "ConvertFrom-AkMultiValue", "ConvertFrom-AkGpLink", "Invoke-AkAdPropertyQuery")
+    $offenders = New-Object System.Collections.Generic.List[string]
+
+    foreach ($file in (Get-ChildItem -LiteralPath $repoRoot -Filter "*.ps1" -File)) {
+        $lineNumber = 0
+        foreach ($line in (Get-Content -LiteralPath $file.FullName)) {
+            $lineNumber++
+            if ($line -match "\|") { continue }
+            foreach ($name in $commaReturning) {
+                if ($line -match ("@\(\s*" + [regex]::Escape($name) + "\b")) {
+                    $offenders.Add("$($file.Name):$lineNumber")
+                }
+            }
+        }
+    }
+
+    if ($offenders.Count -gt 0) {
+        Write-Host "        offenders: $($offenders -join ', ')" -ForegroundColor Yellow
+    }
+    $offenders.Count -eq 0
+}
+
 Test-Case -Name "Get-AkInvalidPropertyName pulls the attribute out of an AD error" {
     $message = "One or more properties are invalid.`\nParameter name: UserType"
     (Get-AkInvalidPropertyName -Message $message) -eq "UserType"

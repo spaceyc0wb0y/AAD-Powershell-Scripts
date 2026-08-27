@@ -191,7 +191,7 @@ function Get-TenantIndex {
         [Parameter(Mandatory)][string]$Path
     )
 
-    $rows = @(Import-AkCsv -Path $Path -Required)
+    $rows = Import-AkCsv -Path $Path -Required
     if ($rows.Count -eq 0) {
         throw "Tenant export '$Path' contains no rows."
     }
@@ -465,7 +465,7 @@ function Invoke-ApplyMode {
         throw "Suffix '@$UpnSuffix' is not registered in forest $($forest.Name). Run with -AddSuffixToForest first, or -Force to proceed anyway."
     }
 
-    $plan = @(Import-AkCsv -Path $ApplyMap -Required)
+    $plan = Import-AkCsv -Path $ApplyMap -Required
     $targets = @($plan | Where-Object { [string](Get-AkPropertyValue -InputObject $_ -Name "Action" -Default "") -eq "Change" })
 
     Write-AkLog -Message "Plan holds $($plan.Count) row(s); $($targets.Count) marked Change." -Level Info

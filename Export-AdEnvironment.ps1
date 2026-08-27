@@ -279,8 +279,10 @@ if (Test-Section -Name "OrganizationalUnits") {
 
     # The domain root can carry links too, most importantly Default Domain Policy.
     $rootObject = Get-ADObject -Identity $domain.DistinguishedName -Properties gPLink, gPOptions @adParams
-    $domainRootLinks = @(ConvertFrom-AkGpLink -GpLink (Get-AkPropertyValue -InputObject $rootObject -Name "gPLink") `
-        -TargetDn $domain.DistinguishedName -TargetType "Domain")
+    # No @() around the call: these helpers already return an array with the
+    # unary comma, and wrapping one nests it a level.
+    $domainRootLinks = ConvertFrom-AkGpLink -GpLink (Get-AkPropertyValue -InputObject $rootObject -Name "gPLink") `
+        -TargetDn $domain.DistinguishedName -TargetType "Domain"
 
     $counts["OrganizationalUnits"] = @($ouRecords).Count
     $exportedSections.Add("OrganizationalUnits")
@@ -316,10 +318,10 @@ if (Test-Section -Name "Users") {
     }
 
     $droppedUserProperties = @()
-    $users = @(Invoke-AkAdPropertyQuery -Property $userProperties -DroppedProperty ([ref]$droppedUserProperties) -Query {
+    $users = Invoke-AkAdPropertyQuery -Property $userProperties -DroppedProperty ([ref]$droppedUserProperties) -Query {
         param($requested)
         Get-ADUser -Filter $userFilter -Properties $requested @adParams @scopeParams
-    })
+    }
     if ($droppedUserProperties.Count -gt 0) {
         Write-AkLog -Message "User attributes absent from this schema: $($droppedUserProperties -join ', '). Their columns are empty." -Level Warning
     }
@@ -405,10 +407,10 @@ if (Test-Section -Name "Groups") {
         "proxyAddresses", "info", "member", "DistinguishedName", "ObjectGUID", "SID", "AdminCount")
 
     $droppedGroupProperties = @()
-    $groups = @(Invoke-AkAdPropertyQuery -Property $groupProperties -DroppedProperty ([ref]$droppedGroupProperties) -Query {
+    $groups = Invoke-AkAdPropertyQuery -Property $groupProperties -DroppedProperty ([ref]$droppedGroupProperties) -Query {
         param($requested)
         Get-ADGroup -Filter * -Properties $requested @adParams @scopeParams
-    })
+    }
     if ($droppedGroupProperties.Count -gt 0) {
         Write-AkLog -Message "Group attributes absent from this schema: $($droppedGroupProperties -join ', '). Their columns are empty." -Level Warning
     }
@@ -485,10 +487,10 @@ if (Test-Section -Name "Computers") {
         "msDS-AllowedToDelegateTo", "ServicePrincipalNames")
 
     $droppedComputerProperties = @()
-    $computers = @(Invoke-AkAdPropertyQuery -Property $computerProperties -DroppedProperty ([ref]$droppedComputerProperties) -Query {
+    $computers = Invoke-AkAdPropertyQuery -Property $computerProperties -DroppedProperty ([ref]$droppedComputerProperties) -Query {
         param($requested)
         Get-ADComputer -Filter * -Properties $requested @adParams @scopeParams
-    })
+    }
     if ($droppedComputerProperties.Count -gt 0) {
         Write-AkLog -Message "Computer attributes absent from this schema: $($droppedComputerProperties -join ', '). Their columns are empty." -Level Warning
     }
