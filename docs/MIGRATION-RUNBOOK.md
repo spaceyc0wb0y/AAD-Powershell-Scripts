@@ -148,6 +148,18 @@ $pkg = "D:\Migration\AdExport-old.local-20260827-101500"
 .\Import-AdEnvironment.ps1 -PackagePath $pkg -Phase GpoLinks
 ```
 
+When the new domain has its own OU layout, translating a source DN by suffix
+points at a container that does not exist and the link is lost. Map those links
+onto real containers instead, with an empty value for a link the new design
+does not want:
+
+```powershell
+.\Import-AdEnvironment.ps1 -PackagePath $pkg -Phase GpoLinks -LinkTargetMap @{
+    'OU=Staff,DC=old,DC=net'  = 'OU=Users,OU=HQ,DC=new,DC=com'
+    'OU=Legacy,DC=old,DC=net' = ''
+}
+```
+
 `-ReplaceServerName` is what re-points UNC paths inside GPOs — drive maps, folder
 redirection, logon scripts, deployed printers. **Omit it and every drive mapping
 will still point at the old, unreachable file server.**

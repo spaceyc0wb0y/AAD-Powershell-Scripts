@@ -70,6 +70,13 @@ this for a rehearsal run or a staged cutover.
 Hashtable mapping old server names to new ones, applied to UNC paths in the GPO
 migration table and to share paths. For example @{ 'OLDFS01' = 'NEWFS01' }.
 
+.PARAMETER LinkTargetMap
+Hashtable mapping an exported GPO link target DN to the DN to link onto in the
+new domain. Use it when the new domain has its own OU layout, so translating the
+source DN by suffix would point at a container that does not exist. An empty
+value drops the link deliberately. For example
+@{ 'OU=Staff,DC=old,DC=net' = 'OU=Users,OU=HQ,DC=new,DC=com'; 'OU=Gone,DC=old,DC=net' = '' }.
+
 .PARAMETER SharePathMap
 Hashtable mapping old local share roots to new ones on this server, for example
 @{ 'D:\Shares' = 'E:\Data' }.
@@ -119,6 +126,8 @@ param(
     [switch]$CreateUsersDisabled,
 
     [hashtable]$ReplaceServerName = @{},
+
+    [hashtable]$LinkTargetMap = @{},
 
     [hashtable]$SharePathMap = @{},
 
@@ -1120,7 +1129,19 @@ if (Test-Phase -Name "GpoLinks") {
         }
 
         $linkTargetDn = $null
-        if ($targetType -eq "Domain") {
+        $mappedTarget = Get-AkMappedLinkTarget -SourceDn $sourceTargetDn -LinkTargetMap $LinkTargetMap
+
+        if ($mappedTarget.Mapped) {
+            # An explicit -LinkTargetMap entry wins over DN translation, which is
+            # how a link lands correctly when the new domain has its own layout.
+            if ($mappedTarget.Skip) {
+                Write-AkLog -Message "Link '$gpoName' on '$sourceTargetDn' is mapped to nothing and is not replayed." -Level Warning
+                Add-Stat -Name "LinksSkippedByMap"
+                continue
+            }
+            $linkTargetDn = $mappedTarget.TargetDn
+        }
+        elseif ($targetType -eq "Domain") {
             # The domain root itself, which is where Default Domain Policy lives.
             $linkTargetDn = $targetDomainDn
             if (-not [string]::IsNullOrWhiteSpace($TargetOuRoot)) { $linkTargetDn = $TargetOuRoot }
@@ -1130,12 +1151,15 @@ if (Test-Phase -Name "GpoLinks") {
         }
 
         if ([string]::IsNullOrWhiteSpace($linkTargetDn) -or -not (Test-AdObjectExists -DistinguishedName $linkTargetDn)) {
-            if ($WhatIfPreference) {
-                Write-AkLog -Message "WhatIf: would link '$gpoName' to '$linkTargetDn'." -Level Info
+            # Only forgive a missing target under -WhatIf when the OU phase is in
+            # this run and would create it. Without that, a rehearsal that stayed
+            # quiet here would be lying about what the real run does.
+            if ($WhatIfPreference -and (Test-Phase -Name "OrganizationalUnits")) {
+                Write-AkLog -Message "WhatIf: would link '$gpoName' to '$linkTargetDn' once the OU phase creates it." -Level Info
                 Add-Stat -Name "LinksWhatIf"
                 continue
             }
-            Write-AkLog -Message "Link target '$linkTargetDn' does not exist. Run the OrganizationalUnits phase first." -Level Error
+            Write-AkLog -Message "Link target '$linkTargetDn' does not exist, so '$gpoName' cannot be linked. Run the OrganizationalUnits phase, or map this link onto a container the new domain does have with -LinkTargetMap @{ '$sourceTargetDn' = '<target DN>' }." -Level Error
             Add-Stat -Name "LinksFailed"
             continue
         }

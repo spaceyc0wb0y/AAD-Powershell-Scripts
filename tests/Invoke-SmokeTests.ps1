@@ -380,6 +380,40 @@ Test-Case -Name "Save-AkJson round trips an object" {
     }
 }
 
+Test-Case -Name "Get-AkMappedLinkTarget reports unmapped for an empty map" {
+    $result = Get-AkMappedLinkTarget -SourceDn "OU=Staff,DC=old,DC=net" -LinkTargetMap @{}
+    (-not $result.Mapped) -and (-not $result.Skip) -and ($null -eq $result.TargetDn)
+}
+
+Test-Case -Name "Get-AkMappedLinkTarget returns the mapped container" {
+    $map = @{ "OU=Staff,DC=old,DC=net" = "OU=Users,OU=HQ,DC=new,DC=com" }
+    $result = Get-AkMappedLinkTarget -SourceDn "OU=Staff,DC=old,DC=net" -LinkTargetMap $map
+    $result.Mapped -and (-not $result.Skip) -and $result.TargetDn -eq "OU=Users,OU=HQ,DC=new,DC=com"
+}
+
+Test-Case -Name "Get-AkMappedLinkTarget matches a source DN case insensitively" {
+    $map = @{ "ou=staff,dc=old,dc=net" = "OU=Users,DC=new,DC=com" }
+    $result = Get-AkMappedLinkTarget -SourceDn "OU=Staff,DC=old,DC=net" -LinkTargetMap $map
+    $result.Mapped -and $result.TargetDn -eq "OU=Users,DC=new,DC=com"
+}
+
+Test-Case -Name "Get-AkMappedLinkTarget treats an empty value as a deliberate skip" {
+    $map = @{ "OU=Gone,DC=old,DC=net" = "" }
+    $result = Get-AkMappedLinkTarget -SourceDn "OU=Gone,DC=old,DC=net" -LinkTargetMap $map
+    $result.Mapped -and $result.Skip -and ($null -eq $result.TargetDn)
+}
+
+Test-Case -Name "Get-AkMappedLinkTarget leaves an unlisted DN to normal translation" {
+    $map = @{ "OU=Staff,DC=old,DC=net" = "OU=Users,DC=new,DC=com" }
+    $result = Get-AkMappedLinkTarget -SourceDn "OU=Finance,DC=old,DC=net" -LinkTargetMap $map
+    -not $result.Mapped
+}
+
+Test-Case -Name "Get-AkMappedLinkTarget returns unmapped for empty input" {
+    $map = @{ "OU=Staff,DC=old,DC=net" = "OU=Users,DC=new,DC=com" }
+    -not (Get-AkMappedLinkTarget -SourceDn "" -LinkTargetMap $map).Mapped
+}
+
 Test-Case -Name "Package manifest round trips" {
     $temp = Join-Path -Path $env:TEMP -ChildPath ("ak-test-" + [System.Guid]::NewGuid().ToString("N"))
     try {

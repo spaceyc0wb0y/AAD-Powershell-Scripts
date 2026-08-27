@@ -684,6 +684,65 @@ function Invoke-AkAdPropertyQuery {
     }
 }
 
+function Get-AkMappedLinkTarget {
+    <#
+    .SYNOPSIS
+    Resolves one exported GPO link target through a caller-supplied link map.
+
+    .DESCRIPTION
+    When the new domain does not share the old OU layout, translating the source
+    DN by suffix produces a container that does not exist and the link is lost.
+    The caller supplies a hashtable keyed by source DN; the value is the DN in
+    the new domain to link onto instead. An empty or null value means the link
+    is deliberately not replayed, which is how you drop a link for an OU the new
+    design does not have.
+
+    Keys are matched case insensitively, because DNs read back from AD do not
+    preserve the casing anyone typed.
+
+    .PARAMETER SourceDn
+    Link target DN as recorded in the export.
+
+    .PARAMETER LinkTargetMap
+    Hashtable of source DN to target DN.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$SourceDn,
+
+        [hashtable]$LinkTargetMap
+    )
+
+    $result = [pscustomobject]@{
+        Mapped   = $false
+        Skip     = $false
+        TargetDn = $null
+    }
+
+    if ($null -eq $LinkTargetMap -or $LinkTargetMap.Count -eq 0) { return $result }
+    if ([string]::IsNullOrWhiteSpace($SourceDn)) { return $result }
+
+    foreach ($key in $LinkTargetMap.Keys) {
+        if ([string]::IsNullOrWhiteSpace($key)) { continue }
+        if ([string]$key -ne $SourceDn -and ([string]$key).ToLowerInvariant() -ne $SourceDn.ToLowerInvariant()) { continue }
+
+        $result.Mapped = $true
+        $value = $LinkTargetMap[$key]
+        if ($null -eq $value -or [string]::IsNullOrWhiteSpace([string]$value)) {
+            $result.Skip = $true
+        }
+        else {
+            $result.TargetDn = [string]$value
+        }
+        return $result
+    }
+
+    return $result
+}
+
 function Import-AkCsv {
     <#
     .SYNOPSIS
@@ -1279,6 +1338,7 @@ Export-ModuleMember -Function @(
     "New-AkPassword",
     "Export-AkCsv",
     "Import-AkCsv",
+    "Get-AkMappedLinkTarget",
     "Get-AkInvalidPropertyName",
     "Invoke-AkAdPropertyQuery",
     "Save-AkJson",
