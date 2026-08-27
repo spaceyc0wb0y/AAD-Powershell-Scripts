@@ -200,15 +200,18 @@ if ($WhatIfPreference) {
 $mapBySam = @{}
 $mapByDn = @{}
 $mapBySid = @{}
+$mapByUpn = @{}
 
 foreach ($entry in $principalMap) {
     $sam = Get-AkPropertyValue -InputObject $entry -Name "SourceSamAccountName"
     $dn = Get-AkPropertyValue -InputObject $entry -Name "SourceDn"
     $sid = Get-AkPropertyValue -InputObject $entry -Name "SourceSid"
+    $upn = Get-AkPropertyValue -InputObject $entry -Name "SourceUpn"
 
     if ($sam -and -not $mapBySam.ContainsKey($sam)) { $mapBySam[$sam] = $entry }
     if ($dn -and -not $mapByDn.ContainsKey($dn)) { $mapByDn[$dn] = $entry }
     if ($sid -and -not $mapBySid.ContainsKey($sid)) { $mapBySid[$sid] = $entry }
+    if ($upn -and -not $mapByUpn.ContainsKey($upn)) { $mapByUpn[$upn] = $entry }
 }
 
 $stats = @{}
@@ -254,8 +257,9 @@ function Resolve-TargetPrincipal {
     Resolves a source principal reference to its target sAMAccountName.
 
     .DESCRIPTION
-    Accepts a source DN, a DOMAIN\name string, a bare sAMAccountName, or a SID,
-    and returns the mapped entry or $null when the principal is not mapped.
+    Accepts a source DN, a DOMAIN\name string, a bare sAMAccountName, a SID, or
+    the name@domain form a GPMC migration table uses, and returns the mapped
+    entry or $null when the principal is not mapped.
     #>
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Reference)
 
@@ -263,6 +267,7 @@ function Resolve-TargetPrincipal {
 
     if ($mapByDn.ContainsKey($Reference)) { return $mapByDn[$Reference] }
     if ($mapBySid.ContainsKey($Reference)) { return $mapBySid[$Reference] }
+    if ($mapByUpn.ContainsKey($Reference)) { return $mapByUpn[$Reference] }
 
     $bare = $Reference
     if ($Reference -like "*\*") { $bare = $Reference.Split("\")[-1] }
@@ -270,6 +275,14 @@ function Resolve-TargetPrincipal {
         # Pull the RDN value out of a DN we do not have indexed.
         $rdn = $Reference.Split(",")[0]
         if ($rdn -like "CN=*") { $bare = $rdn.Substring(3) }
+    }
+
+    # A migration table writes principals as name@domain, and for a group that
+    # name is the sAMAccountName. Strip the suffix and try again; this is what
+    # matches 'Domain Admins@old.local' to the map.
+    if ($bare -like "*@*") {
+        $localPart = $bare.Substring(0, $bare.LastIndexOf("@"))
+        if ($mapBySam.ContainsKey($localPart)) { return $mapBySam[$localPart] }
     }
 
     if ($mapBySam.ContainsKey($bare)) { return $mapBySam[$bare] }
@@ -1005,6 +1018,10 @@ if (Test-Phase -Name "Gpo") {
                     }
                 }
                 else {
+                    if (Test-AkIsWellKnownPrincipalName -Name $source) {
+                        continue    # Everyone, Authenticated Users, NT AUTHORITY\*: valid as-is.
+                    }
+
                     $mapEntry = Resolve-TargetPrincipal -Reference $source
                     if (-not $mapEntry) {
                         $unmappedEntries.Add("Principal not in map: $source")

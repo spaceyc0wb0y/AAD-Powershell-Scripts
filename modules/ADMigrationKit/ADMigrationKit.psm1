@@ -779,6 +779,55 @@ function Select-AkPresentAttribute {
     return $result
 }
 
+function Test-AkIsWellKnownPrincipalName {
+    <#
+    .SYNOPSIS
+    True when a principal name resolves identically in any domain.
+
+    .DESCRIPTION
+    A GPO's DACL and settings reference identities like Everyone, Authenticated
+    Users, and the NT AUTHORITY service accounts. They are not directory objects
+    and never appear in a principal map, so a migration table must leave them
+    alone rather than report them as unmapped.
+
+    Names are matched after stripping an NT AUTHORITY or BUILTIN prefix, and a
+    trailing @domain if the caller passes the UPN-style form a migration table
+    uses.
+
+    .PARAMETER Name
+    Principal reference to test.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$Name
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+
+    $bare = $Name
+    if ($bare -like "*\*") { $bare = $bare.Split("\")[-1] }
+    if ($bare -like "*@*") { $bare = $bare.Substring(0, $bare.LastIndexOf("@")) }
+    $bare = $bare.Trim()
+
+    $wellKnown = @(
+        "Everyone", "Authenticated Users", "ANONYMOUS LOGON", "LOCAL SERVICE",
+        "NETWORK SERVICE", "SYSTEM", "SELF", "CREATOR OWNER", "CREATOR GROUP",
+        "INTERACTIVE", "NETWORK", "BATCH", "SERVICE", "DIALUP",
+        "ENTERPRISE DOMAIN CONTROLLERS", "TERMINAL SERVER USER",
+        "REMOTE INTERACTIVE LOGON", "THIS ORGANIZATION", "OWNER RIGHTS",
+        "IUSR", "RESTRICTED", "PROXY", "LOCAL", "CONSOLE LOGON"
+    )
+
+    foreach ($known in $wellKnown) {
+        if ($bare -eq $known) { return $true }
+    }
+
+    return $false
+}
+
 function Import-AkCsv {
     <#
     .SYNOPSIS
@@ -1980,6 +2029,7 @@ Export-ModuleMember -Function @(
     "New-AkPassword",
     "Export-AkCsv",
     "Import-AkCsv",
+    "Test-AkIsWellKnownPrincipalName",
     "Select-AkPresentAttribute",
     "Get-AkMappedLinkTarget",
     "Get-AkInvalidPropertyName",

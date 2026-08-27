@@ -441,6 +441,32 @@ Test-Case -Name "Select-AkPresentAttribute drops everything when nothing is pres
     (Select-AkPresentAttribute -Attribute @{ mailNickname = "a" } -Present @()).Count -eq 0
 }
 
+Test-Case -Name "Test-AkIsWellKnownPrincipalName matches a bare well-known name" {
+    Test-AkIsWellKnownPrincipalName -Name "Authenticated Users"
+}
+
+Test-Case -Name "Test-AkIsWellKnownPrincipalName matches the migration table UPN form" {
+    # A GPMC migration table writes principals as name@domain, which is what
+    # made every principal look unmapped on a live rebuild.
+    Test-AkIsWellKnownPrincipalName -Name "Everyone@old.local"
+}
+
+Test-Case -Name "Test-AkIsWellKnownPrincipalName strips an NT AUTHORITY prefix" {
+    Test-AkIsWellKnownPrincipalName -Name "NT AUTHORITY\LOCAL SERVICE"
+}
+
+Test-Case -Name "Test-AkIsWellKnownPrincipalName is case insensitive" {
+    Test-AkIsWellKnownPrincipalName -Name "network service"
+}
+
+Test-Case -Name "Test-AkIsWellKnownPrincipalName rejects a real domain group" {
+    -not (Test-AkIsWellKnownPrincipalName -Name "Domain Admins@old.local")
+}
+
+Test-Case -Name "Test-AkIsWellKnownPrincipalName rejects empty input" {
+    -not (Test-AkIsWellKnownPrincipalName -Name "")
+}
+
 Test-Case -Name "Package manifest round trips" {
     $temp = Join-Path -Path $env:TEMP -ChildPath ("ak-test-" + [System.Guid]::NewGuid().ToString("N"))
     try {
