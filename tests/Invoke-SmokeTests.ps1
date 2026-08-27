@@ -594,6 +594,180 @@ Test-Case -Name "Test-AkKeepableUpnSuffix is case insensitive" {
 }
 
 Write-Host ""
+Write-Host "=== Entra to AD sync helpers ===" -ForegroundColor Cyan
+
+Test-Case -Name "ConvertTo-AkBase64Url drops padding and translates the alphabet" {
+    # 0xFB 0xEF 0xFF is '++//' territory in standard base64.
+    $encoded = ConvertTo-AkBase64Url -Bytes ([byte[]](251, 239, 190, 255))
+    ($encoded -notmatch "[+/=]") -and $encoded.Length -gt 0
+}
+
+Test-Case -Name "ConvertTo-AkBase64Url round trips through base64url decoding" {
+    $bytes = [byte[]](1, 2, 3, 250, 251, 252, 253)
+    $encoded = ConvertTo-AkBase64Url -Bytes $bytes
+    $padded = $encoded.Replace("-", "+").Replace("_", "/")
+    while ($padded.Length % 4 -ne 0) { $padded += "=" }
+    $decoded = [System.Convert]::FromBase64String($padded)
+    (-join $decoded) -eq (-join $bytes)
+}
+
+Test-Case -Name "New-AkSamAccountName strips characters AD rejects" {
+    (New-AkSamAccountName -Candidate "jane.doe@contoso.com") -eq "jane.doecontoso.com"
+}
+
+Test-Case -Name "New-AkSamAccountName truncates to the 20 character limit" {
+    $name = New-AkSamAccountName -Candidate "bartholomewfitzgeraldthethird"
+    $name.Length -eq 20
+}
+
+Test-Case -Name "New-AkSamAccountName resolves a collision" {
+    (New-AkSamAccountName -Candidate "jdoe" -Taken @("jdoe")) -eq "jdoe2"
+}
+
+Test-Case -Name "New-AkSamAccountName collision matching is case insensitive" {
+    (New-AkSamAccountName -Candidate "jdoe" -Taken @("JDOE")) -eq "jdoe2"
+}
+
+Test-Case -Name "New-AkSamAccountName keeps the suffix inside the length limit" {
+    $taken = @("abcdefghijklmnopqrst")
+    $name = New-AkSamAccountName -Candidate "abcdefghijklmnopqrstuvwxyz" -Taken $taken
+    ($name.Length -le 20) -and ($name -eq "abcdefghijklmnopqrs2")
+}
+
+Test-Case -Name "New-AkSamAccountName falls back when nothing legal survives" {
+    (New-AkSamAccountName -Candidate "@@@") -eq "user"
+}
+
+Test-Case -Name "Test-AkEntraSyncCandidate accepts a cloud only member" {
+    $user = [pscustomobject]@{ userPrincipalName = "a@contoso.com"; userType = "Member"; accountEnabled = $true; onPremisesSyncEnabled = $null }
+    (Test-AkEntraSyncCandidate -EntraUser $user).Eligible
+}
+
+Test-Case -Name "Test-AkEntraSyncCandidate never re-creates an already synced user" {
+    $user = [pscustomobject]@{ userPrincipalName = "a@contoso.com"; userType = "Member"; accountEnabled = $true; onPremisesSyncEnabled = $true }
+    -not (Test-AkEntraSyncCandidate -EntraUser $user).Eligible
+}
+
+Test-Case -Name "Test-AkEntraSyncCandidate rejects guests by default" {
+    $user = [pscustomobject]@{ userPrincipalName = "a@contoso.com"; userType = "Guest"; accountEnabled = $true }
+    (-not (Test-AkEntraSyncCandidate -EntraUser $user).Eligible) -and
+        (Test-AkEntraSyncCandidate -EntraUser $user -IncludeGuest).Eligible
+}
+
+Test-Case -Name "Test-AkEntraSyncCandidate rejects an external UPN" {
+    $user = [pscustomobject]@{ userPrincipalName = "a_fabrikam.com#EXT#@contoso.onmicrosoft.com"; userType = "Member"; accountEnabled = $true }
+    -not (Test-AkEntraSyncCandidate -EntraUser $user -IncludeGuest).Eligible
+}
+
+Test-Case -Name "Test-AkEntraSyncCandidate rejects a disabled Entra account by default" {
+    $user = [pscustomobject]@{ userPrincipalName = "a@contoso.com"; userType = "Member"; accountEnabled = $false }
+    (-not (Test-AkEntraSyncCandidate -EntraUser $user).Eligible) -and
+        (Test-AkEntraSyncCandidate -EntraUser $user -IncludeDisabled).Eligible
+}
+
+Test-Case -Name "Test-AkEntraSyncCandidate honours an exclusion pattern" {
+    $user = [pscustomobject]@{ userPrincipalName = "svc-backup@contoso.com"; userType = "Member"; accountEnabled = $true }
+    -not (Test-AkEntraSyncCandidate -EntraUser $user -ExcludeUserPrincipalName @("svc-*")).Eligible
+}
+
+Test-Case -Name "Test-AkEntraSyncCandidate survives a user with no UPN under StrictMode" {
+    $user = [pscustomobject]@{ displayName = "Broken" }
+    -not (Test-AkEntraSyncCandidate -EntraUser $user).Eligible
+}
+
+Test-Case -Name "Get-AkEntraAttributeDelta returns only what differs" {
+    $entra = [pscustomobject]@{ displayName = "Jane Doe"; jobTitle = "Paralegal"; department = "Litigation" }
+    $ad = [pscustomobject]@{ DisplayName = "Jane Doe"; Title = "Legal Assistant"; Department = "Litigation" }
+    $delta = Get-AkEntraAttributeDelta -EntraUser $entra -AdUser $ad
+    ($delta.Count -eq 1) -and ($delta["Title"] -eq "Paralegal")
+}
+
+Test-Case -Name "Get-AkEntraAttributeDelta treats a casing change as a change" {
+    $entra = [pscustomobject]@{ givenName = "Jane" }
+    $ad = [pscustomobject]@{ GivenName = "jane" }
+    (Get-AkEntraAttributeDelta -EntraUser $entra -AdUser $ad).Count -eq 1
+}
+
+Test-Case -Name "Get-AkEntraAttributeDelta leaves on-premises only data alone" {
+    $entra = [pscustomobject]@{ displayName = "Jane Doe" }
+    $ad = [pscustomobject]@{ DisplayName = "Jane Doe"; OfficePhone = "x204" }
+    (Get-AkEntraAttributeDelta -EntraUser $entra -AdUser $ad).Count -eq 0
+}
+
+Test-Case -Name "Get-AkEntraAttributeDelta clears absent values only when asked" {
+    $entra = [pscustomobject]@{ displayName = "Jane Doe" }
+    $ad = [pscustomobject]@{ DisplayName = "Jane Doe"; OfficePhone = "x204" }
+    $delta = Get-AkEntraAttributeDelta -EntraUser $entra -AdUser $ad -ClearAbsent
+    ($delta.Count -eq 1) -and ($null -eq $delta["OfficePhone"])
+}
+
+Test-Case -Name "Get-AkEntraSyncPlan creates an account for a new cloud user" {
+    $entra = @([pscustomobject]@{ id = "1111"; userPrincipalName = "jane@contoso.com"; displayName = "Jane Doe"; userType = "Member"; accountEnabled = $true })
+    $plan = Get-AkEntraSyncPlan -EntraUser $entra -AdUser @()
+    ($plan.Count -eq 1) -and ($plan[0].Action -eq "Create")
+}
+
+Test-Case -Name "Get-AkEntraSyncPlan reports an anchored match in sync as None" {
+    $entra = @([pscustomobject]@{ id = "1111"; userPrincipalName = "jane@contoso.com"; displayName = "Jane Doe"; userType = "Member"; accountEnabled = $true })
+    $ad = @([pscustomobject]@{ adminDescription = "1111"; UserPrincipalName = "jane@contoso.com"; DisplayName = "Jane Doe"; Enabled = $true })
+    $plan = Get-AkEntraSyncPlan -EntraUser $entra -AdUser $ad
+    ($plan.Count -eq 1) -and ($plan[0].Action -eq "None") -and ($plan[0].MatchedBy -eq "Anchor")
+}
+
+Test-Case -Name "Get-AkEntraSyncPlan adopts an existing account by UPN and stamps the anchor" {
+    $entra = @([pscustomobject]@{ id = "1111"; userPrincipalName = "jane@contoso.com"; displayName = "Jane Doe"; userType = "Member"; accountEnabled = $true })
+    $ad = @([pscustomobject]@{ adminDescription = ""; UserPrincipalName = "JANE@contoso.com"; DisplayName = "Jane Doe"; Enabled = $true })
+    $plan = Get-AkEntraSyncPlan -EntraUser $entra -AdUser $ad
+    ($plan.Count -eq 1) -and ($plan[0].Action -eq "Update") -and ($plan[0].MatchedBy -eq "UserPrincipalName")
+}
+
+Test-Case -Name "Get-AkEntraSyncPlan updates a drifted attribute" {
+    $entra = @([pscustomobject]@{ id = "1111"; userPrincipalName = "jane@contoso.com"; displayName = "Jane Doe"; jobTitle = "Partner"; userType = "Member"; accountEnabled = $true })
+    $ad = @([pscustomobject]@{ adminDescription = "1111"; UserPrincipalName = "jane@contoso.com"; DisplayName = "Jane Doe"; Title = "Associate"; Enabled = $true })
+    $plan = Get-AkEntraSyncPlan -EntraUser $entra -AdUser $ad
+    ($plan[0].Action -eq "Update") -and ($plan[0].Changes["Title"] -eq "Partner")
+}
+
+Test-Case -Name "Get-AkEntraSyncPlan re-enables an account enabled again in Entra" {
+    $entra = @([pscustomobject]@{ id = "1111"; userPrincipalName = "jane@contoso.com"; displayName = "Jane Doe"; userType = "Member"; accountEnabled = $true })
+    $ad = @([pscustomobject]@{ adminDescription = "1111"; UserPrincipalName = "jane@contoso.com"; DisplayName = "Jane Doe"; Enabled = $false })
+    (Get-AkEntraSyncPlan -EntraUser $entra -AdUser $ad)[0].Action -eq "Enable"
+}
+
+Test-Case -Name "Get-AkEntraSyncPlan reports an anchored account with no Entra user as an orphan" {
+    $ad = @([pscustomobject]@{ adminDescription = "9999"; UserPrincipalName = "gone@contoso.com"; DisplayName = "Gone"; Enabled = $true })
+    $plan = Get-AkEntraSyncPlan -EntraUser @() -AdUser $ad
+    ($plan.Count -eq 1) -and ($plan[0].Action -eq "Orphan")
+}
+
+Test-Case -Name "Get-AkEntraSyncPlan never touches an account it did not stamp" {
+    $ad = @([pscustomobject]@{ adminDescription = ""; UserPrincipalName = "hr@contoso.com"; DisplayName = "HR"; Enabled = $true })
+    (Get-AkEntraSyncPlan -EntraUser @() -AdUser $ad).Count -eq 0
+}
+
+Test-Case -Name "Get-AkEntraSyncPlan skips a user already synced from AD" {
+    $entra = @([pscustomobject]@{ id = "1111"; userPrincipalName = "jane@contoso.com"; displayName = "Jane Doe"; userType = "Member"; accountEnabled = $true; onPremisesSyncEnabled = $true })
+    $plan = Get-AkEntraSyncPlan -EntraUser $entra -AdUser @()
+    ($plan.Count -eq 1) -and ($plan[0].Action -eq "Skip")
+}
+
+Test-Case -Name "Get-AkEntraSyncPlan returns an array for empty input" {
+    $plan = Get-AkEntraSyncPlan -EntraUser @() -AdUser @()
+    $plan.Count -eq 0
+}
+
+Test-Case -Name "Get-AkEntraSyncPlan honours a custom anchor attribute" {
+    $entra = @([pscustomobject]@{ id = "1111"; userPrincipalName = "jane@contoso.com"; displayName = "Jane Doe"; userType = "Member"; accountEnabled = $true })
+    $ad = @([pscustomobject]@{ extensionAttribute15 = "1111"; UserPrincipalName = "other@contoso.com"; DisplayName = "Jane Doe"; Enabled = $true })
+    $plan = Get-AkEntraSyncPlan -EntraUser $entra -AdUser $ad -AnchorProperty "extensionAttribute15"
+    ($plan.Count -eq 1) -and ($plan[0].MatchedBy -eq "Anchor")
+}
+
+Test-Case -Name "Get-AkEntraAttributeMap maps usageLocation onto the country attribute" {
+    (Get-AkEntraAttributeMap)["Country"] -eq "usageLocation"
+}
+
+Write-Host ""
 Write-Host "=== Result ===" -ForegroundColor Cyan
 Write-Host "Passed: $script:Passed" -ForegroundColor Green
 if ($script:Failed -gt 0) {

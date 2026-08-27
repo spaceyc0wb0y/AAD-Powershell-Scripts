@@ -13,9 +13,11 @@ Invoke-AdSecurityScan.ps1       Read-only security assessment
 Test-EntraSyncReadiness.ps1     Entra Connect sync pre-flight (IdFix-class)
 Set-AdUpnSuffix.ps1             Add a routable UPN suffix and reassign user UPNs
 Get-EntraMfaDiagnostics.ps1     Multi-tenant Entra MFA reporting/remediation
+Sync-EntraUsersToAd.ps1         Scheduled Entra cloud-only user provisioning into AD
 modules/ADMigrationKit/         Shared helpers and the export package schema
 tests/Invoke-SmokeTests.ps1     Offline parser check plus helper unit tests
 docs/MIGRATION-RUNBOOK.md       Step-by-step cross-domain rebuild procedure
+docs/ENTRA-TO-AD-SYNC.md        Deploying the Entra to AD user sync
 ```
 
 Reusable logic belongs in `modules/ADMigrationKit`, not duplicated across

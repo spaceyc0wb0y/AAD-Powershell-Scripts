@@ -38,7 +38,14 @@
         'ConvertFrom-AkGpLink',
         'Get-AkRdnValue',
         'Resolve-AkUpnTenantMatch',
-        'Test-AkKeepableUpnSuffix'
+        'Test-AkKeepableUpnSuffix',
+        'ConvertTo-AkBase64Url',
+        'New-AkClientAssertion',
+        'New-AkSamAccountName',
+        'Get-AkEntraAttributeMap',
+        'Test-AkEntraSyncCandidate',
+        'Get-AkEntraAttributeDelta',
+        'Get-AkEntraSyncPlan'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()

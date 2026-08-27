@@ -16,6 +16,7 @@ and run it against the directory in front of you.
 | `Export-AdEnvironment.ps1` | Backs up the whole environment (OUs, users, groups, GPOs, WMI filters, shares, NTFS ACLs) into one portable package. | Read-only |
 | `New-AdPrincipalMap.ps1` | Builds the reviewable old-to-new principal mapping that drives a rebuild. | Writes one CSV |
 | `Import-AdEnvironment.ps1` | Rebuilds an exported environment in a **new domain with a new name**, with no trust or connectivity to the old one. | **Writes to AD** |
+| `Sync-EntraUsersToAd.ps1` | Provisions cloud-only Entra users into an on-premises OU on a schedule, so they can reach shares and printers. | **Writes to AD** |
 | `Get-EntraMfaDiagnostics.ps1` | Multi-tenant Entra MFA reporting and optional per-user MFA remediation. | Optional writes |
 
 Shared logic lives in `modules/ADMigrationKit`. Offline tests are in
@@ -134,6 +135,53 @@ recommendation. Checks cover:
 
 A check that cannot complete is reported as a finding rather than skipped
 silently, so gaps in coverage stay visible.
+
+---
+
+# Provisioning cloud users into AD
+
+`Sync-EntraUsersToAd.ps1` runs on a schedule, reads the cloud-only members of an
+Entra security group, and creates them as real AD accounts in an OU you choose.
+It is the fix for a user who exists only in Entra and therefore cannot open a
+file share or print.
+
+Adapted from [Azure-Samples/B2B-to-AD-Sync][b2bsample], which does the same
+Graph-plus-scheduled-task dance for B2B **guests** feeding Application Proxy.
+This one targets cloud-only **members** and gives them full accounts.
+
+[b2bsample]: https://github.com/Azure-Samples/B2B-to-AD-Sync
+
+```powershell
+# Always preview first. Reads Graph and AD, writes the plan CSV, changes nothing.
+.\Sync-EntraUsersToAd.ps1 -TenantId contoso.com -ClientId 1111... `
+    -CertificateThumbprint AABB... -EntraGroupObjectId 2222... `
+    -TargetOu "OU=Cloud Users,DC=ad,DC=contoso,DC=com" -WhatIf
+```
+
+**Read [`docs/ENTRA-TO-AD-SYNC.md`](docs/ENTRA-TO-AD-SYNC.md) before deploying
+it.** Three things decide whether this works:
+
+1. **Passwords cannot be synchronised down.** Graph never exposes a password, so
+   new accounts get a generated one, written to a credential-grade CSV. In a
+   tenant already running Entra Connect or Cloud Sync, the new AD account soft
+   matches the cloud user, the sync takes it over, and password hash sync then
+   makes the AD password authoritative for both - so the user does end up with
+   one password, but it is the generated one. That CSV is the handoff.
+2. **The target OU has to be inside the Cloud Sync scope**, or the takeover in
+   point 1 never happens and the user ends up with two accounts.
+3. **The cloud UPN suffix has to be registered in the forest.** Use
+   `Set-AdUpnSuffix.ps1` first. An account created with the wrong UPN will never
+   soft match.
+
+Users already synced from AD are always skipped, so it cannot loop against Entra
+Connect. The Entra objectId is stamped on each AD object as an anchor, so an
+account created by hand earlier is adopted rather than duplicated. Nothing is
+ever deleted; an account whose Entra user leaves the scope is reported as an
+orphan and, optionally, disabled and moved.
+
+Microsoft's supported product for this direction is Entra API-driven inbound
+provisioning to on-premises AD, which needs Entra ID Governance licensing. This
+is the unlicensed small-tenant equivalent.
 
 ---
 
