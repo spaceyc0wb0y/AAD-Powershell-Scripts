@@ -25,6 +25,7 @@
         'New-AkPassword',
         'Export-AkCsv',
         'Import-AkCsv',
+        'Save-AkJson',
         'New-AkPackageManifest',
         'Get-AkPackageManifest',
         'Get-AkPropertyValue',

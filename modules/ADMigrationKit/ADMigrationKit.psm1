@@ -558,6 +558,47 @@ function Export-AkCsv {
     return $InputObject.Count
 }
 
+function Save-AkJson {
+    <#
+    .SYNOPSIS
+    Writes an object to a JSON file inside a package, creating the folder as needed.
+
+    .DESCRIPTION
+    Package sections write into subfolders that may not exist yet. Export-AkCsv
+    already creates its parent folder; this does the same for the JSON items so
+    a section is not required to pre-create its own directory.
+
+    .PARAMETER InputObject
+    Object to serialise.
+
+    .PARAMETER Path
+    Full destination path.
+
+    .PARAMETER Depth
+    ConvertTo-Json depth.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [object]$InputObject,
+
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [ValidateRange(1, 20)]
+        [int]$Depth = 5
+    )
+
+    $folder = Split-Path -Path $Path -Parent
+    if (-not [string]::IsNullOrWhiteSpace($folder) -and -not (Test-Path -LiteralPath $folder)) {
+        New-Item -Path $folder -ItemType Directory -Force | Out-Null
+    }
+
+    $InputObject | ConvertTo-Json -Depth $Depth | Set-Content -LiteralPath $Path -Encoding UTF8
+    return $Path
+}
+
 function Import-AkCsv {
     <#
     .SYNOPSIS
@@ -655,7 +696,7 @@ function New-AkPackageManifest {
     }
 
     $path = Get-AkPackageItemPath -PackagePath $PackagePath -Item Manifest
-    $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $path -Encoding UTF8
+    [void](Save-AkJson -InputObject $manifest -Path $path -Depth 6)
     return $manifest
 }
 
@@ -1153,6 +1194,7 @@ Export-ModuleMember -Function @(
     "New-AkPassword",
     "Export-AkCsv",
     "Import-AkCsv",
+    "Save-AkJson",
     "New-AkPackageManifest",
     "Get-AkPackageManifest",
     "Get-AkPropertyValue",

@@ -270,6 +270,34 @@ Test-Case -Name "Export-AkCsv handles an empty collection" {
     }
 }
 
+Test-Case -Name "Save-AkJson creates a missing package subfolder" {
+    # Regression: the Domain section wrote domain\domain.json before anything
+    # created the domain folder, so a full export died on its first section.
+    $temp = Join-Path -Path $env:TEMP -ChildPath ("ak-test-" + [System.Guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -Path $temp -ItemType Directory -Force | Out-Null
+        $path = Get-AkPackageItemPath -PackagePath $temp -Item DomainInfo
+        [void](Save-AkJson -InputObject ([pscustomobject]@{ DnsRoot = 'old.local' }) -Path $path)
+        Test-Path -LiteralPath $path
+    }
+    finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force }
+    }
+}
+
+Test-Case -Name "Save-AkJson round trips an object" {
+    $temp = Join-Path -Path $env:TEMP -ChildPath ("ak-test-" + [System.Guid]::NewGuid().ToString("N"))
+    try {
+        $path = Join-Path -Path $temp -ChildPath "nested\deeper\policy.json"
+        [void](Save-AkJson -InputObject ([pscustomobject]@{ MinPasswordLength = 14 }) -Path $path -Depth 4)
+        $read = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $read.MinPasswordLength -eq 14
+    }
+    finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force }
+    }
+}
+
 Test-Case -Name "Package manifest round trips" {
     $temp = Join-Path -Path $env:TEMP -ChildPath ("ak-test-" + [System.Guid]::NewGuid().ToString("N"))
     try {

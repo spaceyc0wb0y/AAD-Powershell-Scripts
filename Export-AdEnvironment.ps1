@@ -194,11 +194,11 @@ if (Test-Section -Name "Domain") {
         RidMaster                  = $domain.RIDMaster
     }
 
-    $domainInfo | ConvertTo-Json -Depth 5 |
-        Set-Content -LiteralPath (Get-AkPackageItemPath -PackagePath $packagePath -Item DomainInfo) -Encoding UTF8
+    [void](Save-AkJson -InputObject $domainInfo -Depth 5 `
+        -Path (Get-AkPackageItemPath -PackagePath $packagePath -Item DomainInfo))
 
     $passwordPolicy = Get-ADDefaultDomainPasswordPolicy @adParams
-    [pscustomobject]@{
+    $passwordPolicyInfo = [pscustomobject]@{
         ComplexityEnabled           = $passwordPolicy.ComplexityEnabled
         LockoutDuration             = [string]$passwordPolicy.LockoutDuration
         LockoutObservationWindow    = [string]$passwordPolicy.LockoutObservationWindow
@@ -208,8 +208,9 @@ if (Test-Section -Name "Domain") {
         MinPasswordLength           = $passwordPolicy.MinPasswordLength
         PasswordHistoryCount        = $passwordPolicy.PasswordHistoryCount
         ReversibleEncryptionEnabled = $passwordPolicy.ReversibleEncryptionEnabled
-    } | ConvertTo-Json -Depth 4 |
-        Set-Content -LiteralPath (Get-AkPackageItemPath -PackagePath $packagePath -Item DomainPasswordPolicy) -Encoding UTF8
+    }
+    [void](Save-AkJson -InputObject $passwordPolicyInfo -Depth 4 `
+        -Path (Get-AkPackageItemPath -PackagePath $packagePath -Item DomainPasswordPolicy))
 
     $fgpp = @()
     try {
