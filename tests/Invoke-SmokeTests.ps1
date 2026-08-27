@@ -270,6 +270,58 @@ Test-Case -Name "Export-AkCsv handles an empty collection" {
     }
 }
 
+Test-Case -Name "Get-AkInvalidPropertyName pulls the attribute out of an AD error" {
+    $message = "One or more properties are invalid.`\nParameter name: UserType"
+    (Get-AkInvalidPropertyName -Message $message) -eq "UserType"
+}
+
+Test-Case -Name "Get-AkInvalidPropertyName returns null for an unrelated error" {
+    $null -eq (Get-AkInvalidPropertyName -Message "The server is not operational.")
+}
+
+Test-Case -Name "Get-AkInvalidPropertyName returns null for empty input" {
+    $null -eq (Get-AkInvalidPropertyName -Message "")
+}
+
+Test-Case -Name "Invoke-AkAdPropertyQuery drops an unsupported property and retries" {
+    # Stands in for a schema without the Exchange extension: the fake cmdlet
+    # rejects the whole call the way Get-ADUser does, naming one property.
+    $script:attempts = 0
+    $dropped = @()
+    $result = Invoke-AkAdPropertyQuery -Property @("SamAccountName", "extensionAttribute1") `
+        -DroppedProperty ([ref]$dropped) -Query {
+            param($requested)
+            $script:attempts++
+            if ($requested -contains "extensionAttribute1") {
+                throw [System.ArgumentException]::new("One or more properties are invalid.`\nParameter name: extensionAttribute1")
+            }
+            return @("ok")
+        }
+    $script:attempts -eq 2 -and $dropped.Count -eq 1 -and $dropped[0] -eq "extensionAttribute1" -and $result[0] -eq "ok"
+}
+
+Test-Case -Name "Invoke-AkAdPropertyQuery returns no dropped properties on success" {
+    $dropped = @()
+    $result = Invoke-AkAdPropertyQuery -Property @("SamAccountName") -DroppedProperty ([ref]$dropped) -Query {
+        param($requested)
+        return @("ok")
+    }
+    $dropped.Count -eq 0 -and $result[0] -eq "ok"
+}
+
+Test-Case -Name "Invoke-AkAdPropertyQuery rethrows an error it cannot attribute to a property" {
+    try {
+        [void](Invoke-AkAdPropertyQuery -Property @("SamAccountName") -Query {
+            param($requested)
+            throw "The server is not operational."
+        })
+        $false
+    }
+    catch {
+        $_.Exception.Message -like "*not operational*"
+    }
+}
+
 Test-Case -Name "Save-AkJson creates a missing package subfolder" {
     # Regression: the Domain section wrote domain\domain.json before anything
     # created the domain folder, so a full export died on its first section.

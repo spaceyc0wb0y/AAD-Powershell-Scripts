@@ -599,6 +599,91 @@ function Save-AkJson {
     return $Path
 }
 
+function Get-AkInvalidPropertyName {
+    <#
+    .SYNOPSIS
+    Extracts the offending attribute name from an AD cmdlet property error.
+
+    .DESCRIPTION
+    Get-ADUser and friends fail the entire query when any single requested
+    property is absent from the schema, and name it as "Parameter name: X".
+    That wording is English; on a localised server this returns null and the
+    caller rethrows rather than guessing.
+
+    .PARAMETER Message
+    Exception message from the failed AD cmdlet.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [AllowNull()]
+        [string]$Message
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Message)) { return $null }
+
+    $match = [regex]::Match($Message, "Parameter name:\s*(?<name>[^\s]+)")
+    if ($match.Success) { return $match.Groups["name"].Value }
+    return $null
+}
+
+function Invoke-AkAdPropertyQuery {
+    <#
+    .SYNOPSIS
+    Runs an AD query, dropping properties this schema does not have and retrying.
+
+    .DESCRIPTION
+    Property lists in this tooling are deliberately explicit, and some entries
+    only exist where the schema has been extended - the Exchange attributes in
+    particular. One absent attribute fails the whole query, which would lose an
+    entire export section. The cmdlet names the offending property, so drop it,
+    warn, and retry. A dropped property just leaves its CSV column empty, since
+    every record is built with Get-AkPropertyValue.
+
+    .PARAMETER Query
+    Scriptblock taking one argument: the property list to request.
+
+    .PARAMETER Property
+    Properties to request on the first attempt.
+
+    .PARAMETER DroppedProperty
+    Optional [ref] that receives the names that had to be dropped.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [scriptblock]$Query,
+
+        [Parameter(Mandatory)]
+        [string[]]$Property,
+
+        [ref]$DroppedProperty
+    )
+
+    $current = @($Property)
+    $dropped = New-Object System.Collections.Generic.List[string]
+
+    while ($true) {
+        try {
+            $result = & $Query $current
+            # Plain assignment, so no unary comma: nothing unrolls a property set.
+            if ($DroppedProperty) { $DroppedProperty.Value = @($dropped.ToArray()) }
+            return ,@($result)
+        }
+        catch {
+            $bad = Get-AkInvalidPropertyName -Message $_.Exception.Message
+            if (-not $bad -or ($current -notcontains $bad)) { throw }
+
+            $dropped.Add($bad)
+            $current = @($current | Where-Object { $_ -ne $bad })
+            if ($current.Count -eq 0) { throw }
+
+            Write-AkLog -Message "Property '$bad' does not exist in this schema. Retrying without it." -Level Warning
+        }
+    }
+}
+
 function Import-AkCsv {
     <#
     .SYNOPSIS
@@ -1194,6 +1279,8 @@ Export-ModuleMember -Function @(
     "New-AkPassword",
     "Export-AkCsv",
     "Import-AkCsv",
+    "Get-AkInvalidPropertyName",
+    "Invoke-AkAdPropertyQuery",
     "Save-AkJson",
     "New-AkPackageManifest",
     "Get-AkPackageManifest",

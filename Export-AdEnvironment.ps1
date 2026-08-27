@@ -307,7 +307,7 @@ if (Test-Section -Name "Users") {
         "HomeDirectory", "HomeDrive", "ProfilePath", "ScriptPath", "primaryGroupID",
         "extensionAttribute1", "extensionAttribute2", "extensionAttribute3",
         "otherTelephone", "url", "wWWHomePage", "info", "ObjectGUID", "SID",
-        "whenCreated", "LastLogonDate", "PasswordLastSet", "AdminCount", "ServicePrincipalNames", "UserType"
+        "whenCreated", "LastLogonDate", "PasswordLastSet", "AdminCount", "ServicePrincipalNames"
     )
 
     $userFilter = "*"
@@ -315,7 +315,14 @@ if (Test-Section -Name "Users") {
         $userFilter = "Enabled -eq 'True'"
     }
 
-    $users = @(Get-ADUser -Filter $userFilter -Properties $userProperties @adParams @scopeParams)
+    $droppedUserProperties = @()
+    $users = @(Invoke-AkAdPropertyQuery -Property $userProperties -DroppedProperty ([ref]$droppedUserProperties) -Query {
+        param($requested)
+        Get-ADUser -Filter $userFilter -Properties $requested @adParams @scopeParams
+    })
+    if ($droppedUserProperties.Count -gt 0) {
+        Write-AkLog -Message "User attributes absent from this schema: $($droppedUserProperties -join ', '). Their columns are empty." -Level Warning
+    }
 
     $userRecords = foreach ($user in $users) {
         [pscustomobject]@{
@@ -397,7 +404,14 @@ if (Test-Section -Name "Groups") {
     $groupProperties = @("Description", "GroupCategory", "GroupScope", "ManagedBy", "mail",
         "proxyAddresses", "info", "member", "DistinguishedName", "ObjectGUID", "SID", "AdminCount")
 
-    $groups = @(Get-ADGroup -Filter * -Properties $groupProperties @adParams @scopeParams)
+    $droppedGroupProperties = @()
+    $groups = @(Invoke-AkAdPropertyQuery -Property $groupProperties -DroppedProperty ([ref]$droppedGroupProperties) -Query {
+        param($requested)
+        Get-ADGroup -Filter * -Properties $requested @adParams @scopeParams
+    })
+    if ($droppedGroupProperties.Count -gt 0) {
+        Write-AkLog -Message "Group attributes absent from this schema: $($droppedGroupProperties -join ', '). Their columns are empty." -Level Warning
+    }
 
     $wellKnownRids = Get-AkWellKnownRidMap
     $groupRecords = New-Object System.Collections.Generic.List[object]
@@ -470,7 +484,14 @@ if (Test-Section -Name "Computers") {
         "Enabled", "LastLogonDate", "whenCreated", "IPv4Address", "ManagedBy", "TrustedForDelegation",
         "msDS-AllowedToDelegateTo", "ServicePrincipalNames")
 
-    $computers = @(Get-ADComputer -Filter * -Properties $computerProperties @adParams @scopeParams)
+    $droppedComputerProperties = @()
+    $computers = @(Invoke-AkAdPropertyQuery -Property $computerProperties -DroppedProperty ([ref]$droppedComputerProperties) -Query {
+        param($requested)
+        Get-ADComputer -Filter * -Properties $requested @adParams @scopeParams
+    })
+    if ($droppedComputerProperties.Count -gt 0) {
+        Write-AkLog -Message "Computer attributes absent from this schema: $($droppedComputerProperties -join ', '). Their columns are empty." -Level Warning
+    }
 
     $computerRecords = foreach ($computer in $computers) {
         [pscustomobject]@{

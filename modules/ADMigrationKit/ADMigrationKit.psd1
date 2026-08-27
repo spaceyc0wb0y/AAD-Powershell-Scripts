@@ -25,6 +25,8 @@
         'New-AkPassword',
         'Export-AkCsv',
         'Import-AkCsv',
+        'Get-AkInvalidPropertyName',
+        'Invoke-AkAdPropertyQuery',
         'Save-AkJson',
         'New-AkPackageManifest',
         'Get-AkPackageManifest',
