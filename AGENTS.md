@@ -71,6 +71,10 @@ $errors
 - **Return arrays with the unary comma**: `return ,@($items)`. A bare
   `return @()` is unrolled by the pipeline into `$null`, and the caller's
   `.Count` then throws under StrictMode. This has already caused one bug.
+  The corollary: **never wrap a call to one of those helpers in `@()`**.
+  `@(Import-AkCsv ...)` does not flatten the result, it nests it one level, and
+  the first `.Count` or `[0]` downstream is then wrong. Assign it directly. A
+  smoke test scans for this.
 - Any script that modifies AD, GPOs, or shares must support
   `SupportsShouldProcess` and honour `-WhatIf` on every write.
 - Comment the non-obvious: locale-dependent built-in group names, gPLink
