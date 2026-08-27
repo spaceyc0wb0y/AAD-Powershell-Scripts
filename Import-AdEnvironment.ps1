@@ -457,6 +457,29 @@ if (Test-Phase -Name "Users") {
     $users = Import-AkCsv -Path (Get-AkPackageItemPath -PackagePath $PackagePath -Item Users)
     $passwordRecords = New-Object System.Collections.Generic.List[object]
 
+    # mailNickname arrives with the Exchange schema extension. A domain that
+    # never ran Exchange does not have it, and Set-ADUser fails the whole call
+    # on one unknown attribute, so check the target schema before using them.
+    $candidateExtraAttributes = @("proxyAddresses", "mailNickname")
+    $presentExtraAttributes = @()
+    try {
+        $schemaNc = (Get-ADRootDSE @adParams).schemaNamingContext
+        foreach ($attr in $candidateExtraAttributes) {
+            $found = @(Get-ADObject -SearchBase $schemaNc @adParams `
+                -LDAPFilter "(&(objectClass=attributeSchema)(lDAPDisplayName=$attr))" -ErrorAction SilentlyContinue)
+            if ($found.Count -gt 0) { $presentExtraAttributes += $attr }
+        }
+    }
+    catch {
+        Write-AkLog -Message "Could not read the target schema: $($_.Exception.Message). Optional attributes will be attempted as-is." -Level Warning
+        $presentExtraAttributes = $candidateExtraAttributes
+    }
+
+    $absentExtraAttributes = @($candidateExtraAttributes | Where-Object { $presentExtraAttributes -notcontains $_ })
+    if ($absentExtraAttributes.Count -gt 0) {
+        Write-AkLog -Message "Target schema has no $($absentExtraAttributes -join ', '). Those values are not migrated; accounts are otherwise complete." -Level Warning
+    }
+
     foreach ($user in $users) {
         $sam = Get-AkPropertyValue -InputObject $user -Name "SamAccountName"
         if ([string]::IsNullOrWhiteSpace($sam)) { continue }
@@ -579,19 +602,9 @@ if (Test-Phase -Name "Users") {
 
                 New-ADUser @newUserParams @adParams | Out-Null
 
-                # proxyAddresses drives Entra soft-matching, so it is set after
-                # creation as a raw attribute rather than a named parameter.
-                $proxyAddresses = ConvertFrom-AkMultiValue -Value (Get-AkPropertyValue -InputObject $user -Name "ProxyAddresses")
-                $extraAttributes = @{}
-                if ($proxyAddresses.Count -gt 0) { $extraAttributes["proxyAddresses"] = $proxyAddresses }
-
-                $mailNickname = Get-AkPropertyValue -InputObject $user -Name "MailNickname"
-                if (-not [string]::IsNullOrWhiteSpace($mailNickname)) { $extraAttributes["mailNickname"] = $mailNickname }
-
-                if ($extraAttributes.Count -gt 0) {
-                    Set-ADUser -Identity $targetSam -Replace $extraAttributes @adParams
-                }
-
+                # Record the credential the moment the account exists. Anything
+                # that fails after this point still leaves a usable account, but
+                # a lost generated password cannot be recovered.
                 $passwordRecords.Add([pscustomobject]@{
                     SamAccountName    = $targetSam
                     UserPrincipalName = $targetUpn
@@ -602,6 +615,29 @@ if (Test-Phase -Name "Users") {
                 })
 
                 Add-Stat -Name "UsersCreated"
+
+                # proxyAddresses drives Entra soft-matching, so it is set after
+                # creation as a raw attribute rather than a named parameter.
+                $proxyAddresses = ConvertFrom-AkMultiValue -Value (Get-AkPropertyValue -InputObject $user -Name "ProxyAddresses")
+                $extraAttributes = @{}
+                if ($proxyAddresses.Count -gt 0) { $extraAttributes["proxyAddresses"] = $proxyAddresses }
+
+                $mailNickname = Get-AkPropertyValue -InputObject $user -Name "MailNickname"
+                if (-not [string]::IsNullOrWhiteSpace($mailNickname)) { $extraAttributes["mailNickname"] = $mailNickname }
+
+                $extraAttributes = Select-AkPresentAttribute -Attribute $extraAttributes -Present $presentExtraAttributes
+
+                if ($extraAttributes.Count -gt 0) {
+                    try {
+                        Set-ADUser -Identity $targetSam -Replace $extraAttributes @adParams
+                    }
+                    catch {
+                        # The account is already created and recorded; an optional
+                        # attribute is not worth discarding it over.
+                        Write-AkLog -Message "Created '$targetSam' but could not set $($extraAttributes.Keys -join ', '): $($_.Exception.Message)" -Level Warning
+                        Add-Stat -Name "UsersMissingOptionalAttributes"
+                    }
+                }
             }
             catch {
                 Write-AkLog -Message "Failed to create user '$targetSam': $($_.Exception.Message)" -Level Error
@@ -927,7 +963,7 @@ if (Test-Phase -Name "Gpo") {
                 New-Item -Path $migrationFolder -ItemType Directory -Force | Out-Null
             }
 
-            $gpm = New-Object -ComObject "Microsoft.GPMgmt.GPM"
+            $gpm = New-Object -ComObject "GPMgmt.GPM"
             $gpmConstants = $gpm.GetConstants()
             $gpmBackupDir = $gpm.GetBackupDir($backupFolder)
             $gpmSearch = $gpm.CreateSearchCriteria()

@@ -414,6 +414,33 @@ Test-Case -Name "Get-AkMappedLinkTarget returns unmapped for empty input" {
     -not (Get-AkMappedLinkTarget -SourceDn "" -LinkTargetMap $map).Mapped
 }
 
+Test-Case -Name "Select-AkPresentAttribute drops an attribute the schema lacks" {
+    # Regression: a domain that never ran Exchange has no mailNickname, and
+    # Set-ADUser fails the whole call on one unknown attribute.
+    $kept = Select-AkPresentAttribute -Attribute @{ proxyAddresses = @("SMTP:a@b.com"); mailNickname = "a" } `
+        -Present @("proxyAddresses")
+    $kept.Count -eq 1 -and $kept.ContainsKey("proxyAddresses") -and -not $kept.ContainsKey("mailNickname")
+}
+
+Test-Case -Name "Select-AkPresentAttribute keeps everything the schema has" {
+    $kept = Select-AkPresentAttribute -Attribute @{ proxyAddresses = @("SMTP:a@b.com"); mailNickname = "a" } `
+        -Present @("proxyAddresses", "mailNickname")
+    $kept.Count -eq 2
+}
+
+Test-Case -Name "Select-AkPresentAttribute matches attribute names case insensitively" {
+    $kept = Select-AkPresentAttribute -Attribute @{ mailNickname = "a" } -Present @("MAILNICKNAME")
+    $kept.Count -eq 1
+}
+
+Test-Case -Name "Select-AkPresentAttribute returns an empty hashtable for no input" {
+    (Select-AkPresentAttribute -Attribute @{} -Present @("proxyAddresses")).Count -eq 0
+}
+
+Test-Case -Name "Select-AkPresentAttribute drops everything when nothing is present" {
+    (Select-AkPresentAttribute -Attribute @{ mailNickname = "a" } -Present @()).Count -eq 0
+}
+
 Test-Case -Name "Package manifest round trips" {
     $temp = Join-Path -Path $env:TEMP -ChildPath ("ak-test-" + [System.Guid]::NewGuid().ToString("N"))
     try {

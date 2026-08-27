@@ -743,6 +743,42 @@ function Get-AkMappedLinkTarget {
     return $result
 }
 
+function Select-AkPresentAttribute {
+    <#
+    .SYNOPSIS
+    Keeps only the attributes the target schema actually has.
+
+    .DESCRIPTION
+    Optional attributes vary by schema. mailNickname and the extensionAttribute
+    range arrive with the Exchange schema extension, so a domain that never ran
+    Exchange does not have them. Set-ADUser fails the whole call when any one
+    attribute is unknown, which would otherwise abort a user mid-creation.
+
+    .PARAMETER Attribute
+    Hashtable of attribute name to value.
+
+    .PARAMETER Present
+    Attribute names known to exist in the target schema.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [hashtable]$Attribute,
+
+        [string[]]$Present
+    )
+
+    $result = @{}
+    if ($null -eq $Attribute -or $Attribute.Count -eq 0) { return $result }
+
+    foreach ($key in $Attribute.Keys) {
+        if ($Present -contains $key) { $result[$key] = $Attribute[$key] }
+    }
+
+    return $result
+}
+
 function Import-AkCsv {
     <#
     .SYNOPSIS
@@ -1944,6 +1980,7 @@ Export-ModuleMember -Function @(
     "New-AkPassword",
     "Export-AkCsv",
     "Import-AkCsv",
+    "Select-AkPresentAttribute",
     "Get-AkMappedLinkTarget",
     "Get-AkInvalidPropertyName",
     "Invoke-AkAdPropertyQuery",
