@@ -13,6 +13,33 @@ customers.txt
 clients.txt
 !tenants.example.txt
 
+# AD migration export packages (credential-grade: full directory + ACL dump)
+AdExport/
+AdExport-*/
+**/AdExport-*/
+*.migtable
+principal-map.csv
+generated-passwords.csv
+validation-findings-*.csv
+
+# Assessment and readiness output
+AdSecurityScan/
+**/AdSecurityScan/
+EntraSyncReadiness/
+**/EntraSyncReadiness/
+*.html
+!docs/*.html
+
+# UPN suffix plans (full user roster plus tenant match state)
+UpnSuffix/
+**/UpnSuffix/
+upn-plan-*.csv
+upn-apply-*.csv
+
+# GPO backups
+gpo/backup/
+**/Backup/manifest.xml
+
 # Secrets and local configuration
 .env
 .env.*

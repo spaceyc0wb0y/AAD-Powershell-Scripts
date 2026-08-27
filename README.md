@@ -1,8 +1,159 @@
 # AAD PowerShell Scripts
 
-PowerShell utilities for Microsoft Entra ID/Azure AD administration and diagnostics.
+PowerShell tooling for Active Directory and Microsoft Entra ID administration:
+assessment, reporting, backup, and cross-domain migration.
 
-The current script, `Get-EntraMfaDiagnostics.ps1`, collects user MFA information across one or more Entra tenants and exports CSV reports.
+The intended workflow is to clone this repository onto a domain-joined machine
+and run it against the directory in front of you.
+
+## What is here
+
+| Script | Purpose | Writes? |
+| --- | --- | --- |
+| `Invoke-AdSecurityScan.ps1` | Security assessment with severity-ranked findings and specific remediation advice. | Read-only |
+| `Test-EntraSyncReadiness.ps1` | Finds the object problems that break Entra Connect sync, IdFix-style. Runs against a live domain or an export package. | Read-only |
+| `Set-AdUpnSuffix.ps1` | Registers a routable UPN suffix in the forest and reassigns user UPNs onto it, via a reviewable plan CSV. Classifies each proposed UPN against a tenant export so a soft-match target is not confused with a duplicate. | **Writes to AD** |
+| `Export-AdEnvironment.ps1` | Backs up the whole environment (OUs, users, groups, GPOs, WMI filters, shares, NTFS ACLs) into one portable package. | Read-only |
+| `New-AdPrincipalMap.ps1` | Builds the reviewable old-to-new principal mapping that drives a rebuild. | Writes one CSV |
+| `Import-AdEnvironment.ps1` | Rebuilds an exported environment in a **new domain with a new name**, with no trust or connectivity to the old one. | **Writes to AD** |
+| `Get-EntraMfaDiagnostics.ps1` | Multi-tenant Entra MFA reporting and optional per-user MFA remediation. | Optional writes |
+
+Shared logic lives in `modules/ADMigrationKit`. Offline tests are in
+`tests/Invoke-SmokeTests.ps1`.
+
+## Quick start
+
+Assess the domain you are standing in:
+
+```powershell
+.\Invoke-AdSecurityScan.ps1 -HtmlReport
+```
+
+Check whether it is ready to sync to Entra:
+
+```powershell
+.\Test-EntraSyncReadiness.ps1 -VerifiedDomain contoso.com
+```
+
+Back up everything, including all GPOs:
+
+```powershell
+.\Export-AdEnvironment.ps1 -OutputPath D:\Backup -FileServer FS01
+```
+
+## Requirements
+
+- **Windows PowerShell 5.1** for the Active Directory scripts. They run on domain
+  controllers and member servers, so they deliberately avoid PowerShell 7 syntax.
+- **PowerShell 7+** for `Get-EntraMfaDiagnostics.ps1`, which is cross-platform.
+- RSAT: `Install-WindowsFeature RSAT-AD-PowerShell, RSAT-Group-Policy-Mgmt-Tools`
+- Domain Admin rights for the import; a domain user is enough for the read-only
+  scans, though some checks report more detail with higher privilege.
+
+---
+
+# Migrating to a new domain
+
+`Export-AdEnvironment.ps1` -> `New-AdPrincipalMap.ps1` -> `Import-AdEnvironment.ps1`
+rebuilds an environment in a brand new domain, with **no trust, no replication,
+and no network path** between old and new. The only thing that moves is a folder
+you copy by hand.
+
+**Read [`docs/MIGRATION-RUNBOOK.md`](docs/MIGRATION-RUNBOOK.md) before running any
+of it.** The short version:
+
+```powershell
+# On the OLD domain
+.\Export-AdEnvironment.ps1 -OutputPath D:\Migration -FileServer OLDFS01 -AclDepth 2
+
+# Copy the package folder to the NEW domain controller, then:
+.\Test-EntraSyncReadiness.ps1 -PackagePath D:\Migration\AdExport-old.local-20260827-101500
+.\New-AdPrincipalMap.ps1 -PackagePath $pkg -TargetDomainDns corp.contoso.com -TargetUpnSuffix contoso.com
+
+#  >>> REVIEW import\principal-map.csv BEFORE CONTINUING <<<
+
+.\Import-AdEnvironment.ps1 -PackagePath $pkg -WhatIf
+.\Import-AdEnvironment.ps1 -PackagePath $pkg -Phase OrganizationalUnits,Groups,Users,Membership
+.\Import-AdEnvironment.ps1 -PackagePath $pkg -Phase Gpo,GpoLinks -ReplaceServerName @{ 'OLDFS01' = 'NEWFS01' }
+.\Import-AdEnvironment.ps1 -PackagePath $pkg -Phase Validate -ReplaceServerName @{ 'OLDFS01' = 'NEWFS01' }
+```
+
+### Three things that surprise people
+
+1. **Passwords and SID history do not migrate.** Both need a trust and ADMT.
+   Accounts get generated passwords (written to a CSV in the package) and brand
+   new SIDs. Because the SIDs are new, every ACL has to be re-pointed — that is
+   what the principal map is for, and it is the real work of the migration.
+
+2. **`Import-GPO` restores GPO contents and nothing else.** Links, link order,
+   enforcement, and WMI filter associations are all captured and replayed
+   separately by this tooling. Note that in the raw `gPLink` attribute the GPO
+   listed *last* has the *highest* precedence; the export records both the raw
+   position and the resolved GPMC link order so precedence survives intact.
+
+3. **The GPO migration table does not catch everything.** Group Policy
+   Preferences XML, drive maps especially, keeps references to the old domain.
+   The `Validate` phase re-reads every imported GPO and reports exactly what is
+   left, with the setting types to check.
+
+### Entra hybrid notes
+
+- The rebuild creates **new `objectGUID`s**, so any previously synced object's
+  `ImmutableId` no longer matches. Plan soft match (by UPN or primary SMTP) or a
+  deliberate hard-match reset. `mail` and `proxyAddresses` are preserved by the
+  export precisely so soft matching can work.
+- A `.local` UPN suffix **cannot sync**. Add and verify a routable domain and
+  reassign UPNs before enabling sync, or users get rewritten to
+  `onmicrosoft.com`. `Test-EntraSyncReadiness.ps1` flags this as Critical.
+- Narrow the sync scope off *All objects* before you enable it.
+
+---
+
+# Security scanning
+
+```powershell
+.\Invoke-AdSecurityScan.ps1 -OutputPath C:\Reports -HtmlReport
+.\Invoke-AdSecurityScan.ps1 -MinimumSeverity High
+```
+
+Read-only. Every finding carries a severity, the affected object, and a specific
+recommendation. Checks cover:
+
+- **Identity hygiene** — stale and never-used accounts, ancient passwords,
+  password-never-expires, `PASSWD_NOTREQD`, enabled Guest account.
+- **Credential exposure** — Kerberoastable service accounts, AS-REP roastable
+  accounts, reversible encryption, DES-only Kerberos, and `cpassword` values in
+  SYSVOL (MS14-025, where the decryption key is public).
+- **Privilege** — membership of every privileged and legacy operator group,
+  orphaned `adminCount`, krbtgt password age, Protected Users adoption.
+- **Delegation** — unconstrained delegation, constrained delegation with
+  protocol transition, resource-based delegation.
+- **Domain configuration** — functional levels, `ms-DS-MachineAccountQuota`,
+  AD Recycle Bin, password policy, Pre-Windows 2000 Compatible Access
+  membership, LAPS deployment, unsupported operating systems.
+
+A check that cannot complete is reported as a finding rather than skipped
+silently, so gaps in coverage stay visible.
+
+---
+
+# Testing
+
+```powershell
+.\tests\Invoke-SmokeTests.ps1
+```
+
+Parser-checks every script and unit-tests the helper logic. No AD, tenant, or
+network access needed. Run it after any edit.
+
+The AD, GPO, and SMB **write** paths cannot be tested from a workstation.
+Rehearse those in a lab or against a snapshot.
+
+---
+
+# Entra MFA diagnostics
+
+`Get-EntraMfaDiagnostics.ps1` collects user MFA information across one or more Entra tenants and exports CSV reports.
 It can also optionally remediate per-user MFA state for non-Global Administrator users.
 
 ## Features

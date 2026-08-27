@@ -1,0 +1,462 @@
+<#
+.SYNOPSIS
+Offline smoke tests for this repository.
+
+.DESCRIPTION
+Runs two classes of check that need no Active Directory, no Entra tenant, and no
+network access:
+
+1. A parser check of every .ps1 and .psm1 file in the repository.
+2. Unit tests of the pure helper functions in the ADMigrationKit module, which
+   are where the cross-domain rebuild logic actually lives.
+
+Run this after any edit. It is the only test in this repository that can be run
+from a workstation. Everything that touches AD or Graph must be validated in a
+lab domain.
+
+.EXAMPLE
+.\tests\Invoke-SmokeTests.ps1
+#>
+
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$repoRoot = Split-Path -Path $PSScriptRoot -Parent
+$script:Passed = 0
+$script:Failed = 0
+
+function Test-Case {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][scriptblock]$Body
+    )
+
+    try {
+        $result = & $Body
+        if ($result -eq $true) {
+            Write-Host "  PASS  $Name" -ForegroundColor Green
+            $script:Passed++
+        }
+        else {
+            Write-Host "  FAIL  $Name (returned '$result')" -ForegroundColor Red
+            $script:Failed++
+        }
+    }
+    catch {
+        Write-Host "  FAIL  $Name ($($_.Exception.Message))" -ForegroundColor Red
+        $script:Failed++
+    }
+}
+
+Write-Host ""
+Write-Host "=== Parser check ===" -ForegroundColor Cyan
+
+$scriptFiles = @(
+    Get-ChildItem -Path $repoRoot -Recurse -Include "*.ps1", "*.psm1" -File |
+        Where-Object { $_.FullName -notmatch "\\\.git\\" }
+)
+
+foreach ($file in $scriptFiles) {
+    $tokens = $null
+    $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$tokens, [ref]$errors)
+
+    $relative = $file.FullName.Substring($repoRoot.Length).TrimStart("\")
+    if ($errors -and $errors.Count -gt 0) {
+        Write-Host "  FAIL  $relative" -ForegroundColor Red
+        foreach ($parseError in $errors) {
+            Write-Host "          line $($parseError.Extent.StartLineNumber): $($parseError.Message)" -ForegroundColor Red
+        }
+        $script:Failed++
+    }
+    else {
+        Write-Host "  PASS  $relative" -ForegroundColor Green
+        $script:Passed++
+    }
+}
+
+Write-Host ""
+Write-Host "=== ADMigrationKit helper tests ===" -ForegroundColor Cyan
+
+Import-Module (Join-Path -Path $repoRoot -ChildPath "modules\ADMigrationKit\ADMigrationKit.psd1") -Force
+
+Test-Case -Name "ConvertTo-AkDomainDn builds a domain DN" {
+    (ConvertTo-AkDomainDn -DnsDomainName 'corp.old.local') -eq 'DC=corp,DC=old,DC=local'
+}
+
+Test-Case -Name "ConvertTo-AkDomainDn handles a single label domain" {
+    (ConvertTo-AkDomainDn -DnsDomainName 'contoso') -eq 'DC=contoso'
+}
+
+Test-Case -Name "ConvertTo-AkTargetDn rewrites only the domain suffix" {
+    $result = ConvertTo-AkTargetDn -SourceDn 'CN=Bob Smith,OU=Sales,OU=HQ,DC=old,DC=local' `
+        -SourceDomainDn 'DC=old,DC=local' -TargetDomainDn 'DC=new,DC=com'
+    $result -eq 'CN=Bob Smith,OU=Sales,OU=HQ,DC=new,DC=com'
+}
+
+Test-Case -Name "ConvertTo-AkTargetDn maps the domain root itself" {
+    (ConvertTo-AkTargetDn -SourceDn 'DC=old,DC=local' -SourceDomainDn 'DC=old,DC=local' -TargetDomainDn 'DC=new,DC=com') -eq 'DC=new,DC=com'
+}
+
+Test-Case -Name "ConvertTo-AkTargetDn is case insensitive on the suffix" {
+    (ConvertTo-AkTargetDn -SourceDn 'OU=IT,dc=OLD,dc=LOCAL' -SourceDomainDn 'DC=old,DC=local' -TargetDomainDn 'DC=new,DC=com') -eq 'OU=IT,DC=new,DC=com'
+}
+
+Test-Case -Name "ConvertTo-AkTargetDn leaves foreign DNs untouched" {
+    (ConvertTo-AkTargetDn -SourceDn 'CN=X,DC=other,DC=tld' -SourceDomainDn 'DC=old,DC=local' -TargetDomainDn 'DC=new,DC=com') -eq 'CN=X,DC=other,DC=tld'
+}
+
+Test-Case -Name "ConvertTo-AkTargetDn returns null for empty input" {
+    $null -eq (ConvertTo-AkTargetDn -SourceDn '' -SourceDomainDn 'DC=old,DC=local' -TargetDomainDn 'DC=new,DC=com')
+}
+
+Test-Case -Name "Get-AkParentDn returns the container" {
+    (Get-AkParentDn -DistinguishedName 'OU=Sales,OU=HQ,DC=old,DC=local') -eq 'OU=HQ,DC=old,DC=local'
+}
+
+Test-Case -Name "Get-AkParentDn respects an escaped comma in the RDN" {
+    (Get-AkParentDn -DistinguishedName 'CN=Smith\, Bob,OU=Sales,DC=old,DC=local') -eq 'OU=Sales,DC=old,DC=local'
+}
+
+Test-Case -Name "Get-AkDnDepth counts unescaped components" {
+    (Get-AkDnDepth -DistinguishedName 'OU=Sales,OU=HQ,DC=old,DC=local') -eq 4
+}
+
+Test-Case -Name "Get-AkDnDepth ignores escaped commas" {
+    (Get-AkDnDepth -DistinguishedName 'CN=Smith\, Bob,OU=Sales,DC=old,DC=local') -eq 4
+}
+
+Test-Case -Name "Get-AkDnDepth orders parents before children" {
+    $parent = Get-AkDnDepth -DistinguishedName 'OU=HQ,DC=old,DC=local'
+    $child = Get-AkDnDepth -DistinguishedName 'OU=Sales,OU=HQ,DC=old,DC=local'
+    $parent -lt $child
+}
+
+Test-Case -Name "Get-AkSidRid returns the trailing RID" {
+    (Get-AkSidRid -Sid 'S-1-5-21-111-222-333-512') -eq '512'
+}
+
+Test-Case -Name "Get-AkWellKnownRidMap maps 512 to Domain Admins" {
+    (Get-AkWellKnownRidMap)['512'] -eq 'DomainAdmins'
+}
+
+Test-Case -Name "Test-AkIsBuiltInSid detects BUILTIN groups" {
+    (Test-AkIsBuiltInSid -Sid 'S-1-5-32-544') -eq $true
+}
+
+Test-Case -Name "Test-AkIsBuiltInSid detects well known non-domain SIDs" {
+    (Test-AkIsBuiltInSid -Sid 'S-1-1-0') -eq $true
+}
+
+Test-Case -Name "Test-AkIsBuiltInSid treats domain SIDs as migratable" {
+    (Test-AkIsBuiltInSid -Sid 'S-1-5-21-1-2-3-1105') -eq $false
+}
+
+Test-Case -Name "New-AkPassword honours the requested length" {
+    (New-AkPassword -Length 24).Length -eq 24
+}
+
+Test-Case -Name "New-AkPassword satisfies default complexity rules" {
+    $ok = $true
+    for ($i = 0; $i -lt 50; $i++) {
+        $password = New-AkPassword -Length 16
+        if ($password -cnotmatch '[A-Z]' -or
+            $password -cnotmatch '[a-z]' -or
+            $password -notmatch '[0-9]' -or
+            $password -notmatch '[^a-zA-Z0-9]') {
+            $ok = $false
+            break
+        }
+    }
+    $ok
+}
+
+Test-Case -Name "New-AkPassword does not repeat itself" {
+    $set = New-Object System.Collections.Generic.HashSet[string]
+    for ($i = 0; $i -lt 100; $i++) {
+        [void]$set.Add((New-AkPassword -Length 20))
+    }
+    $set.Count -eq 100
+}
+
+Test-Case -Name "New-AkPassword distributes guaranteed classes past position 4" {
+    # Guards against the naive build order where the first four characters are
+    # always upper, lower, digit, symbol.
+    $symbolLate = $false
+    for ($i = 0; $i -lt 100; $i++) {
+        $password = New-AkPassword -Length 20
+        if ($password.Substring(4) -match '[^a-zA-Z0-9]') {
+            $symbolLate = $true
+            break
+        }
+    }
+    $symbolLate
+}
+
+Test-Case -Name "ConvertTo-AkBoolean round trips CSV text" {
+    (ConvertTo-AkBoolean -Value 'True') -eq $true -and
+    (ConvertTo-AkBoolean -Value 'False') -eq $false -and
+    (ConvertTo-AkBoolean -Value '') -eq $false -and
+    (ConvertTo-AkBoolean -Value $null -Default $true) -eq $true
+}
+
+Test-Case -Name "ConvertFrom-AkMultiValue splits and trims" {
+    $values = ConvertFrom-AkMultiValue -Value 'smtp:a@x.com; SMTP:b@x.com;'
+    $values.Count -eq 2 -and $values[1] -eq 'SMTP:b@x.com'
+}
+
+Test-Case -Name "ConvertFrom-AkMultiValue returns an empty array for null" {
+    (ConvertFrom-AkMultiValue -Value $null).Count -eq 0
+}
+
+Test-Case -Name "ConvertTo-AkMultiValue joins with semicolons" {
+    (ConvertTo-AkMultiValue -Value @('a', 'b')) -eq 'a;b'
+}
+
+Test-Case -Name "Get-AkPropertyValue survives missing properties under StrictMode" {
+    $object = [pscustomobject]@{ Present = 'yes' }
+    (Get-AkPropertyValue -InputObject $object -Name 'Present') -eq 'yes' -and
+    (Get-AkPropertyValue -InputObject $object -Name 'Absent' -Default 'fallback') -eq 'fallback' -and
+    (Get-AkPropertyValue -InputObject $null -Name 'Anything' -Default 'fallback') -eq 'fallback'
+}
+
+Test-Case -Name "Get-AkSafeName strips path characters" {
+    (Get-AkSafeName -Value 'old.local\bad:name') -eq 'old.local_bad_name'
+}
+
+Test-Case -Name "Get-AkPackageItemPath resolves known items" {
+    (Get-AkPackageItemPath -PackagePath 'C:\pkg' -Item 'Users') -eq 'C:\pkg\identity\users.csv'
+}
+
+Test-Case -Name "Get-AkPackageItemPath rejects unknown items" {
+    try {
+        [void](Get-AkPackageItemPath -PackagePath 'C:\pkg' -Item 'NotAThing')
+        $false
+    }
+    catch {
+        $true
+    }
+}
+
+Test-Case -Name "Import-AkCsv returns an empty array for a missing file" {
+    (Import-AkCsv -Path (Join-Path $env:TEMP 'ak-does-not-exist-12345.csv')).Count -eq 0
+}
+
+Test-Case -Name "Export-AkCsv and Import-AkCsv round trip" {
+    $temp = Join-Path -Path $env:TEMP -ChildPath ("ak-test-" + [System.Guid]::NewGuid().ToString("N"))
+    try {
+        $path = Join-Path -Path $temp -ChildPath "sub\rows.csv"
+        [void](Export-AkCsv -InputObject @([pscustomobject]@{ A = 1; B = 'x' }) -Path $path)
+        $rows = Import-AkCsv -Path $path
+        $rows.Count -eq 1 -and $rows[0].B -eq 'x'
+    }
+    finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force }
+    }
+}
+
+Test-Case -Name "Export-AkCsv handles an empty collection" {
+    $temp = Join-Path -Path $env:TEMP -ChildPath ("ak-test-" + [System.Guid]::NewGuid().ToString("N"))
+    try {
+        $path = Join-Path -Path $temp -ChildPath "empty.csv"
+        $count = Export-AkCsv -InputObject @() -Path $path
+        $count -eq 0 -and (Test-Path -LiteralPath $path) -and (Import-AkCsv -Path $path).Count -eq 0
+    }
+    finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force }
+    }
+}
+
+Test-Case -Name "Package manifest round trips" {
+    $temp = Join-Path -Path $env:TEMP -ChildPath ("ak-test-" + [System.Guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -Path $temp -ItemType Directory -Force | Out-Null
+        [void](New-AkPackageManifest -PackagePath $temp -SourceDomainDns 'old.local' `
+            -SourceDomainNetBios 'OLD' -SourceDomainDn 'DC=old,DC=local' `
+            -SourceDomainSid 'S-1-5-21-1-2-3' -Counts @{ Users = 42 } -Sections @('Users'))
+        $manifest = Get-AkPackageManifest -PackagePath $temp
+        $manifest.SourceDomainDns -eq 'old.local' -and $manifest.Counts.Users -eq 42
+    }
+    finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force }
+    }
+}
+
+Test-Case -Name "Get-AkPackageManifest fails clearly on a non-package folder" {
+    $temp = Join-Path -Path $env:TEMP -ChildPath ("ak-test-" + [System.Guid]::NewGuid().ToString("N"))
+    try {
+        New-Item -Path $temp -ItemType Directory -Force | Out-Null
+        try {
+            [void](Get-AkPackageManifest -PackagePath $temp)
+            $false
+        }
+        catch {
+            $_.Exception.Message -like "*manifest.json*"
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Recurse -Force }
+    }
+}
+
+Test-Case -Name "ConvertFrom-AkGpLink returns empty for an unlinked object" {
+    (ConvertFrom-AkGpLink -GpLink '' -TargetDn 'OU=X,DC=old,DC=local' -TargetType 'OrganizationalUnit').Count -eq 0
+}
+
+Test-Case -Name "ConvertFrom-AkGpLink parses a single link" {
+    $raw = '[LDAP://cn={31B2F340-016D-11D2-945F-00C04FB984F9},cn=policies,cn=system,DC=old,DC=local;0]'
+    $links = ConvertFrom-AkGpLink -GpLink $raw -TargetDn 'DC=old,DC=local' -TargetType 'Domain'
+    $links.Count -eq 1 -and
+    $links[0].GpoId -eq '31B2F340-016D-11D2-945F-00C04FB984F9' -and
+    $links[0].Enabled -eq $true -and
+    $links[0].Enforced -eq $false -and
+    $links[0].LinkOrder -eq 1
+}
+
+Test-Case -Name "ConvertFrom-AkGpLink assigns GPMC precedence in reverse attribute order" {
+    # The GPO written LAST in gPLink has the HIGHEST precedence (link order 1).
+    # Getting this backwards silently inverts policy precedence after a rebuild.
+    $raw = '[LDAP://cn={AAAAAAAA-0000-0000-0000-000000000001},cn=policies,cn=system,DC=old,DC=local;0]' +
+           '[LDAP://cn={BBBBBBBB-0000-0000-0000-000000000002},cn=policies,cn=system,DC=old,DC=local;0]' +
+           '[LDAP://cn={CCCCCCCC-0000-0000-0000-000000000003},cn=policies,cn=system,DC=old,DC=local;0]'
+    $links = ConvertFrom-AkGpLink -GpLink $raw -TargetDn 'OU=Sales,DC=old,DC=local' -TargetType 'OrganizationalUnit'
+
+    $last = $links | Where-Object { $_.GpoId -like 'CCCCCCCC*' }
+    $first = $links | Where-Object { $_.GpoId -like 'AAAAAAAA*' }
+
+    $links.Count -eq 3 -and
+    $last.LinkOrder -eq 1 -and $last.AttributeIndex -eq 2 -and
+    $first.LinkOrder -eq 3 -and $first.AttributeIndex -eq 0
+}
+
+Test-Case -Name "ConvertFrom-AkGpLink decodes the disabled flag" {
+    $raw = '[LDAP://cn={AAAAAAAA-0000-0000-0000-000000000001},cn=policies,cn=system,DC=old,DC=local;1]'
+    $link = (ConvertFrom-AkGpLink -GpLink $raw -TargetDn 'OU=X,DC=old,DC=local' -TargetType 'OrganizationalUnit')[0]
+    $link.Enabled -eq $false -and $link.Enforced -eq $false
+}
+
+Test-Case -Name "ConvertFrom-AkGpLink decodes the enforced flag" {
+    $raw = '[LDAP://cn={AAAAAAAA-0000-0000-0000-000000000001},cn=policies,cn=system,DC=old,DC=local;2]'
+    $link = (ConvertFrom-AkGpLink -GpLink $raw -TargetDn 'OU=X,DC=old,DC=local' -TargetType 'OrganizationalUnit')[0]
+    $link.Enabled -eq $true -and $link.Enforced -eq $true
+}
+
+Test-Case -Name "ConvertFrom-AkGpLink decodes disabled plus enforced" {
+    $raw = '[LDAP://cn={AAAAAAAA-0000-0000-0000-000000000001},cn=policies,cn=system,DC=old,DC=local;3]'
+    $link = (ConvertFrom-AkGpLink -GpLink $raw -TargetDn 'OU=X,DC=old,DC=local' -TargetType 'OrganizationalUnit')[0]
+    $link.Enabled -eq $false -and $link.Enforced -eq $true
+}
+
+Test-Case -Name "Get-AkRdnValue returns a simple CN" {
+    (Get-AkRdnValue -DistinguishedName 'CN=John Smith,OU=Sales,DC=old,DC=local') -eq 'John Smith'
+}
+
+Test-Case -Name "Get-AkRdnValue unescapes a comma in the RDN" {
+    # "Smith, Bob" is stored escaped in the DN; rebuilding with the escape
+    # still present would create a visibly wrong account name.
+    (Get-AkRdnValue -DistinguishedName 'CN=Smith\, Bob,OU=Sales,DC=old,DC=local') -eq 'Smith, Bob'
+}
+
+Test-Case -Name "Get-AkRdnValue handles an OU prefix" {
+    (Get-AkRdnValue -DistinguishedName 'OU=Sales,OU=HQ,DC=old,DC=local') -eq 'Sales'
+}
+
+Test-Case -Name "Get-AkRdnValue returns null for empty input" {
+    $null -eq (Get-AkRdnValue -DistinguishedName '')
+}
+
+Test-Case -Name "Resolve-AkUpnTenantMatch skips a UPN that already matches" {
+    $r = Resolve-AkUpnTenantMatch -CurrentUpn 'bob@contoso.com' -ProposedUpn 'bob@contoso.com' -TenantDataAvailable
+    ($r.Action -eq 'Skip') -and ($r.TenantMatch -eq 'NoChange')
+}
+
+Test-Case -Name "Resolve-AkUpnTenantMatch reports unchecked without a tenant export" {
+    $r = Resolve-AkUpnTenantMatch -CurrentUpn 'bob@ad.contoso.com' -ProposedUpn 'bob@contoso.com'
+    ($r.Action -eq 'Change') -and ($r.TenantMatch -eq 'NotChecked')
+}
+
+Test-Case -Name "Resolve-AkUpnTenantMatch allows a change with no tenant collision" {
+    $r = Resolve-AkUpnTenantMatch -CurrentUpn 'bob@ad.contoso.com' -ProposedUpn 'bob@contoso.com' `
+        -CurrentCloudState 'Synced' -ProposedCloudState 'Absent' -TenantDataAvailable
+    ($r.Action -eq 'Change') -and ($r.TenantMatch -eq 'None')
+}
+
+Test-Case -Name "Resolve-AkUpnTenantMatch treats an unsynced account hitting a cloud-only user as a soft match" {
+    # This is the adoption case: the collision is the desired outcome.
+    $r = Resolve-AkUpnTenantMatch -CurrentUpn 'bob@ad.contoso.com' -ProposedUpn 'bob@contoso.com' `
+        -CurrentCloudState 'Absent' -ProposedCloudState 'CloudOnly' -TenantDataAvailable
+    ($r.Action -eq 'Change') -and ($r.TenantMatch -eq 'CloudOnlyMatch')
+}
+
+Test-Case -Name "Resolve-AkUpnTenantMatch flags a synced account hitting a cloud-only user" {
+    # Same collision, opposite verdict: this one is a duplicate-attribute error.
+    $r = Resolve-AkUpnTenantMatch -CurrentUpn 'bob@ad.contoso.com' -ProposedUpn 'bob@contoso.com' `
+        -CurrentCloudState 'Synced' -ProposedCloudState 'CloudOnly' -TenantDataAvailable
+    ($r.Action -eq 'Review') -and ($r.TenantMatch -eq 'CollisionCloudOnly')
+}
+
+Test-Case -Name "Resolve-AkUpnTenantMatch flags a collision with another synced account" {
+    $r = Resolve-AkUpnTenantMatch -CurrentUpn 'bob@ad.contoso.com' -ProposedUpn 'bob@contoso.com' `
+        -CurrentCloudState 'Absent' -ProposedCloudState 'Synced' -TenantDataAvailable
+    ($r.Action -eq 'Review') -and ($r.TenantMatch -eq 'CollisionSynced')
+}
+
+Test-Case -Name "Resolve-AkUpnTenantMatch refuses to guess when the sync state is unknown" {
+    $r = Resolve-AkUpnTenantMatch -CurrentUpn 'bob@ad.contoso.com' -ProposedUpn 'bob@contoso.com' `
+        -CurrentCloudState 'Absent' -ProposedCloudState 'Unknown' -TenantDataAvailable
+    ($r.Action -eq 'Review') -and ($r.TenantMatch -eq 'CollisionUnknown')
+}
+
+Test-Case -Name "Resolve-AkUpnTenantMatch reviews a row with no derivable UPN" {
+    $r = Resolve-AkUpnTenantMatch -CurrentUpn 'bob@ad.contoso.com' -ProposedUpn '' -TenantDataAvailable
+    ($r.Action -eq 'Review') -and ($r.TenantMatch -eq 'NotApplicable')
+}
+
+Test-Case -Name "Test-AkKeepableUpnSuffix never keeps a subdomain of the target" {
+    # ad.contoso.com has a dot and a real TLD, so every naive routability test
+    # passes it, yet it is exactly the suffix that has to move.
+    -not (Test-AkKeepableUpnSuffix -CurrentSuffix 'ad.contoso.com' -TargetSuffix 'contoso.com')
+}
+
+Test-Case -Name "Test-AkKeepableUpnSuffix never keeps a deeper subdomain of the target" {
+    -not (Test-AkKeepableUpnSuffix -CurrentSuffix 'corp.ad.contoso.com' -TargetSuffix 'contoso.com')
+}
+
+Test-Case -Name "Test-AkKeepableUpnSuffix keeps an unrelated routable suffix" {
+    Test-AkKeepableUpnSuffix -CurrentSuffix 'fabrikam.com' -TargetSuffix 'contoso.com'
+}
+
+Test-Case -Name "Test-AkKeepableUpnSuffix does not keep the target itself" {
+    -not (Test-AkKeepableUpnSuffix -CurrentSuffix 'contoso.com' -TargetSuffix 'contoso.com')
+}
+
+Test-Case -Name "Test-AkKeepableUpnSuffix does not keep a private TLD" {
+    -not (Test-AkKeepableUpnSuffix -CurrentSuffix 'contoso.local' -TargetSuffix 'contoso.com')
+}
+
+Test-Case -Name "Test-AkKeepableUpnSuffix does not keep a single label suffix" {
+    -not (Test-AkKeepableUpnSuffix -CurrentSuffix 'contoso' -TargetSuffix 'contoso.com')
+}
+
+Test-Case -Name "Test-AkKeepableUpnSuffix does not keep an empty suffix" {
+    -not (Test-AkKeepableUpnSuffix -CurrentSuffix '' -TargetSuffix 'contoso.com')
+}
+
+Test-Case -Name "Test-AkKeepableUpnSuffix is case insensitive" {
+    -not (Test-AkKeepableUpnSuffix -CurrentSuffix 'AD.Contoso.COM' -TargetSuffix 'contoso.com')
+}
+
+Write-Host ""
+Write-Host "=== Result ===" -ForegroundColor Cyan
+Write-Host "Passed: $script:Passed" -ForegroundColor Green
+if ($script:Failed -gt 0) {
+    Write-Host "Failed: $script:Failed" -ForegroundColor Red
+    exit 1
+}
+
+Write-Host "Failed: 0" -ForegroundColor Green
+Write-Host ""
+exit 0
