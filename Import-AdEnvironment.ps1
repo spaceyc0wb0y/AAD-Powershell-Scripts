@@ -651,6 +651,17 @@ if (Test-Phase -Name "Users") {
 
     if ($passwordRecords.Count -gt 0) {
         $passwordPath = Get-AkPackageItemPath -PackagePath $PackagePath -Item GeneratedPasswords
+
+        # The phase is re-runnable and only creates what is missing, so a second
+        # run writes only the new accounts. Keep the previous file rather than
+        # overwriting credentials that cannot be recovered any other way.
+        if (Test-Path -LiteralPath $passwordPath) {
+            $archived = [System.IO.Path]::ChangeExtension($passwordPath, $null).TrimEnd(".") +
+                "-" + (Get-Date -Format "yyyyMMdd-HHmmss") + ".csv"
+            Move-Item -LiteralPath $passwordPath -Destination $archived -Force
+            Write-AkLog -Message "Existing password file kept as $archived" -Level Warning
+        }
+
         [void](Export-AkCsv -InputObject $passwordRecords.ToArray() -Path $passwordPath)
         Write-AkLog -Message "Generated passwords written to $passwordPath" -Level Warning
         Write-AkLog -Message "That file is plaintext credentials for every imported account. Distribute it securely and delete it once users have signed in." -Level Warning
