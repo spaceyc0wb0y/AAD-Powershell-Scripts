@@ -1088,6 +1088,21 @@ if (Test-Phase -Name "Gpo") {
             $existingGpo = $null
             try { $existingGpo = Get-GPO -Name $displayName -Domain $targetDomainDns -ErrorAction Stop } catch { $existingGpo = $null }
 
+            # The two default policies carry the same well-known GUID in every
+            # domain. Importing the old domain's copy over the new domain's would
+            # replace its user rights assignments with ones naming SIDs that do
+            # not exist here - which can lock everyone out of the DC. Never do it,
+            # even when -SkipExisting is off to force a re-import of everything
+            # else. Reapply their settings by hand from the exported HTML report.
+            $sourceGpoId = ([string](Get-AkPropertyValue -InputObject $gpo -Name "GpoId")).Trim("{}").ToLowerInvariant()
+            $defaultGpoIds = @("31b2f340-016d-11d2-945f-00c04fb984f9", "6ac1786c-016f-11d2-945f-00c04fb984f9")
+
+            if ($existingGpo -and ($defaultGpoIds -contains $sourceGpoId)) {
+                Write-AkLog -Message "'$displayName' is a default policy that already exists here. Never overwritten; reapply its settings by hand from gpo\reports." -Level Warning
+                Add-Stat -Name "GposSkippedDefault"
+                continue
+            }
+
             if ($existingGpo -and $SkipExisting) {
                 Add-Stat -Name "GposSkippedExisting"
                 continue
