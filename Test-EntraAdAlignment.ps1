@@ -222,7 +222,28 @@ try {
         if ((Get-Command Connect-MgGraph).Parameters.ContainsKey("NoWelcome")) { $connectParams["NoWelcome"] = $true }
 
         Write-AkLog -Message "Signing in to Microsoft Graph (delegated User.Read.All, Domain.Read.All)." -Level Info
-        Connect-MgGraph @connectParams | Out-Null
+
+        # Connect-MgGraph's device-code path emits telemetry through an
+        # EventSource whose listener can throw a harmless EventSourceException
+        # ("An error occurred when writing to a listener") on Windows
+        # PowerShell 5.1. Under this script's ErrorActionPreference=Stop that
+        # noise became fatal before the device code even displayed. Tolerate
+        # errors during the call, let its output through (the device code
+        # message must reach the console), then judge success by Get-MgContext.
+        $previousEap = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            Connect-MgGraph @connectParams
+        }
+        finally {
+            $ErrorActionPreference = $previousEap
+        }
+
+        $context = Get-MgContext
+        if ($null -eq $context) {
+            throw "Connect-MgGraph did not establish a session. If the error mentions 'writing to a listener' or an assembly conflict, retry from a fresh PowerShell window with no Az/AzureAD modules loaded; otherwise use -TenantUserCsv for the offline mode."
+        }
+        Write-AkLog -Message "Connected to tenant $($context.TenantId) as $($context.Account)." -Level Info
 
         if ($verified.Count -eq 0) {
             $domainsResponse = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/domains"
