@@ -12,6 +12,7 @@ and run it against the directory in front of you.
 | --- | --- | --- |
 | `Invoke-AdSecurityScan.ps1` | Security assessment with severity-ranked findings and specific remediation advice. | Read-only |
 | `Test-EntraSyncReadiness.ps1` | Finds the object problems that break Entra Connect sync, IdFix-style. Runs against a live domain or an export package. | Read-only |
+| `Test-EntraAdAlignment.ps1` | Compares AD users against the Entra tenant (Graph sign-in with self-installed dependency, or a portal CSV offline) and reports what would duplicate, rename, or strip on sync-scope widening. | Read-only |
 | `Set-AdUpnSuffix.ps1` | Registers a routable UPN suffix in the forest and reassigns user UPNs onto it, via a reviewable plan CSV. Classifies each proposed UPN against a tenant export so a soft-match target is not confused with a duplicate. | **Writes to AD** |
 | `Export-AdEnvironment.ps1` | Backs up the whole environment (OUs, users, groups, GPOs, WMI filters, shares, NTFS ACLs) into one portable package. | Read-only |
 | `New-AdPrincipalMap.ps1` | Builds the reviewable old-to-new principal mapping that drives a rebuild. | Writes one CSV |
@@ -34,6 +35,17 @@ Check whether it is ready to sync to Entra:
 
 ```powershell
 .\Test-EntraSyncReadiness.ps1 -VerifiedDomain contoso.com
+```
+
+Cross-check AD against the tenant before widening a sync scope - finds the
+duplicates-in-waiting, cloud renames, mailbox-rename and stripped-alias risks,
+and lists the cloud-only users `Sync-EntraUsersToAd.ps1` should provision.
+Installs its own Graph dependency (Microsoft.Graph.Authentication, current
+user) on first run; `-TenantUserCsv` is the offline fallback:
+
+```powershell
+.\Test-EntraAdAlignment.ps1 -UseDeviceCode
+.\Test-EntraAdAlignment.ps1 -TenantUserCsv .\exportUsers.csv -VerifiedDomain contoso.com
 ```
 
 Back up everything, including all GPOs:

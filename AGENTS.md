@@ -11,6 +11,7 @@ New-AdPrincipalMap.ps1          Build the old-to-new principal mapping
 Import-AdEnvironment.ps1        Rebuild that package in a new domain
 Invoke-AdSecurityScan.ps1       Read-only security assessment
 Test-EntraSyncReadiness.ps1     Entra Connect sync pre-flight (IdFix-class)
+Test-EntraAdAlignment.ps1       AD vs Entra tenant cross-check before widening sync scope
 Set-AdUpnSuffix.ps1             Add a routable UPN suffix and reassign user UPNs
 Get-EntraMfaDiagnostics.ps1     Multi-tenant Entra MFA reporting/remediation
 Sync-EntraUsersToAd.ps1         Scheduled Entra cloud-only user provisioning into AD

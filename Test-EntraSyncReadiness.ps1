@@ -129,7 +129,29 @@ else {
     $sourceLabel = "live domain: $($domain.DNSRoot)"
     Write-AkLog -Message "Reading users from $sourceLabel" -Level Info
 
-    $properties = @("UserPrincipalName", "DisplayName", "mail", "mailNickname", "proxyAddresses", "Enabled")
+    # mailNickname arrives with the Exchange schema extension. A domain that
+    # never ran Exchange does not have it, and Get-ADUser fails the whole query
+    # on one unknown attribute, so check the schema before requesting them. An
+    # absent attribute reads as empty, which every check already tolerates.
+    $properties = @("UserPrincipalName", "DisplayName", "Enabled")
+    $candidateProperties = @("mail", "mailNickname", "proxyAddresses")
+    try {
+        $schemaNc = (Get-ADRootDSE @adParams).schemaNamingContext
+        foreach ($attr in $candidateProperties) {
+            $found = @(Get-ADObject -SearchBase $schemaNc @adParams `
+                -LDAPFilter "(&(objectClass=attributeSchema)(lDAPDisplayName=$attr))" -ErrorAction SilentlyContinue)
+            if ($found.Count -gt 0) {
+                $properties += $attr
+            }
+            else {
+                Write-AkLog -Message "Schema has no '$attr'. Its checks report nothing for this domain." -Level Warning
+            }
+        }
+    }
+    catch {
+        Write-AkLog -Message "Could not read the schema: $($_.Exception.Message). Optional attributes will be attempted as-is." -Level Warning
+        $properties += $candidateProperties
+    }
     foreach ($adUser in @(Get-ADUser -Filter * -Properties $properties @adParams)) {
         if (-not $IncludeDisabled -and -not $adUser.Enabled) { continue }
 

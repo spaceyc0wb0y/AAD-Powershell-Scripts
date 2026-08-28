@@ -216,6 +216,27 @@ Test-Case -Name "ConvertTo-AkMultiValue joins with semicolons" {
     (ConvertTo-AkMultiValue -Value @('a', 'b')) -eq 'a;b'
 }
 
+Test-Case -Name "AkMultiValue round-trips a value containing semicolons" {
+    # An X.400 proxy address holds semicolons inside one value. The naive
+    # split shredded it into seven proxyAddresses entries on import.
+    $x400 = 'X400:c=US;a= ;p=CORP;o=Exchange;s=Doe;g=Jane;i=E'
+    $joined = ConvertTo-AkMultiValue -Value @($x400, 'SMTP:jdoe@olddomain.net')
+    $values = ConvertFrom-AkMultiValue -Value $joined
+    $values.Count -eq 2 -and $values[0] -eq $x400 -and $values[1] -eq 'SMTP:jdoe@olddomain.net'
+}
+
+Test-Case -Name "AkMultiValue round-trips backslashes and escaped-backslash-then-separator" {
+    $values = ConvertFrom-AkMultiValue -Value (ConvertTo-AkMultiValue -Value @('a\', 'b;c', 'CN=Smith\, John'))
+    $values.Count -eq 3 -and $values[0] -eq 'a\' -and $values[1] -eq 'b;c' -and $values[2] -eq 'CN=Smith\, John'
+}
+
+Test-Case -Name "ConvertFrom-AkMultiValue still parses a pre-escaping package field" {
+    # Fields written before 2026-08-28 contain no escape sequences; a DN's
+    # own escaped comma must pass through untouched.
+    $values = ConvertFrom-AkMultiValue -Value 'CN=Smith\, John,OU=X;CN=Other,OU=Y'
+    $values.Count -eq 2 -and $values[0] -eq 'CN=Smith\, John,OU=X'
+}
+
 Test-Case -Name "Get-AkPropertyValue survives missing properties under StrictMode" {
     $object = [pscustomobject]@{ Present = 'yes' }
     (Get-AkPropertyValue -InputObject $object -Name 'Present') -eq 'yes' -and
@@ -818,6 +839,138 @@ Test-Case -Name "Get-AkEntraSyncPlan honours a custom anchor attribute" {
 
 Test-Case -Name "Get-AkEntraAttributeMap maps usageLocation onto the country attribute" {
     (Get-AkEntraAttributeMap)["Country"] -eq "usageLocation"
+}
+
+Test-Case -Name "Get-AkPrimarySmtp is case sensitive about the primary marker" {
+    (Get-AkPrimarySmtp -ProxyAddresses @("smtp:alias@x.com", "SMTP:primary@x.com")) -eq "primary@x.com" -and
+    (Get-AkPrimarySmtp -ProxyAddresses @("smtp:alias@x.com")) -eq "" -and
+    (Get-AkPrimarySmtp -ProxyAddresses $null) -eq ""
+}
+
+Test-Case -Name "Get-AkCsvColumnName matches ignoring case and spaces" {
+    $row = [pscustomobject]@{ "User principal name" = "a@x.com"; "Directory synced" = "Yes" }
+    (Get-AkCsvColumnName -Row $row -Candidate @("userPrincipalName", "User principal name")) -eq "User principal name" -and
+    (Get-AkCsvColumnName -Row $row -Candidate @("directorySynced")) -eq "Directory synced" -and
+    $null -eq (Get-AkCsvColumnName -Row $row -Candidate @("proxyAddresses"))
+}
+
+# Shared fixtures for the alignment comparer.
+function New-TestAdUser {
+    param([string]$Sam, [string]$Upn, [string]$Name = "", [object[]]$Proxies = @())
+    [pscustomobject]@{
+        SamAccountName    = $Sam
+        UserPrincipalName = $Upn
+        DisplayName       = $Name
+        Enabled           = $true
+        Mail              = ""
+        ProxyAddresses    = $Proxies
+        DistinguishedName = "CN=$Sam,DC=test"
+    }
+}
+
+function New-TestCloudUser {
+    param([string]$Upn, [string]$Name = "", [bool]$Synced = $false, [object[]]$Proxies = @(), [string]$Type = "Member")
+    [pscustomobject]@{
+        Id                    = [guid]::NewGuid().ToString()
+        DisplayName           = $Name
+        UserPrincipalName     = $Upn
+        AccountEnabled        = $true
+        UserType              = $Type
+        OnPremisesSyncEnabled = $Synced
+        ProxyAddresses        = $Proxies
+        Mail                  = ""
+    }
+}
+
+Test-Case -Name "Alignment reports a clean matched pair as MatchedPairs only" {
+    $findings = Get-AkDirectoryAlignmentFinding `
+        -AdUser @(New-TestAdUser -Sam "a" -Upn "a@x.com" -Name "A User") `
+        -CloudUser @(New-TestCloudUser -Upn "a@x.com" -Name "A User") `
+        -VerifiedDomain @("x.com")
+    $findings.Count -eq 1 -and $findings[0].Check -eq "MatchedPairs" -and $findings[0].Value -eq "1"
+}
+
+Test-Case -Name "Alignment flags an unverified AD UPN suffix as Critical" {
+    $findings = Get-AkDirectoryAlignmentFinding `
+        -AdUser @(New-TestAdUser -Sam "a" -Upn "a@internal.local") `
+        -CloudUser @() -VerifiedDomain @("x.com")
+    @($findings | Where-Object { $_.Check -eq "AdUpnSuffixNotVerified" -and $_.Severity -eq "Critical" }).Count -eq 1
+}
+
+Test-Case -Name "Alignment flags adoption blocked by a still-synced cloud user" {
+    $findings = Get-AkDirectoryAlignmentFinding `
+        -AdUser @(New-TestAdUser -Sam "a" -Upn "a@x.com") `
+        -CloudUser @(New-TestCloudUser -Upn "a@x.com" -Synced $true) `
+        -VerifiedDomain @("x.com")
+    @($findings | Where-Object { $_.Check -eq "CloudUserStillDirSynced" -and $_.Severity -eq "Critical" }).Count -eq 1
+}
+
+Test-Case -Name "Alignment detects a person renamed in the cloud by display name" {
+    $findings = Get-AkDirectoryAlignmentFinding `
+        -AdUser @(New-TestAdUser -Sam "jgray" -Upn "jgray@x.com" -Name "Jane Smith") `
+        -CloudUser @(New-TestCloudUser -Upn "jsmith@x.com" -Name "Jane Smith") `
+        -VerifiedDomain @("x.com")
+    $renamed = @($findings | Where-Object { $_.Check -eq "RenamedInCloud" })
+    $renamed.Count -eq 1 -and $renamed[0].Value -eq "jgray@x.com -> jsmith@x.com"
+}
+
+Test-Case -Name "Alignment reports an AD user missing from the cloud as a would-be create" {
+    $findings = Get-AkDirectoryAlignmentFinding `
+        -AdUser @(New-TestAdUser -Sam "new" -Upn "new@x.com" -Name "New Person") `
+        -CloudUser @() -VerifiedDomain @("x.com")
+    @($findings | Where-Object { $_.Check -eq "AdUserNotInCloud" }).Count -eq 1
+}
+
+Test-Case -Name "Alignment flags primary SMTP mismatch and stripped aliases with proxy data" {
+    $ad = New-TestAdUser -Sam "a" -Upn "a@x.com" -Proxies @("SMTP:a@x.com")
+    $cloud = New-TestCloudUser -Upn "a@x.com" -Proxies @("SMTP:alpha@x.com", "smtp:a.alias@x.com", "smtp:a@t.onmicrosoft.com")
+    $findings = Get-AkDirectoryAlignmentFinding -AdUser @($ad) -CloudUser @($cloud) -VerifiedDomain @("x.com") -HasCloudProxyData
+    @($findings | Where-Object { $_.Check -eq "PrimarySmtpMismatch" }).Count -eq 1 -and
+    @($findings | Where-Object { $_.Check -eq "CloudAliasMissingOnPrem" }).Count -eq 2 -and
+    @($findings | Where-Object { $_.Value -like "*onmicrosoft*" }).Count -eq 0
+}
+
+Test-Case -Name "Alignment skips SMTP checks without cloud proxy data" {
+    $ad = New-TestAdUser -Sam "a" -Upn "a@x.com" -Proxies @("SMTP:a@x.com")
+    $cloud = New-TestCloudUser -Upn "a@x.com" -Proxies @("SMTP:alpha@x.com")
+    $findings = Get-AkDirectoryAlignmentFinding -AdUser @($ad) -CloudUser @($cloud) -VerifiedDomain @("x.com")
+    @($findings | Where-Object { $_.Check -in @("PrimarySmtpMismatch", "CloudAliasMissingOnPrem") }).Count -eq 0
+}
+
+Test-Case -Name "Alignment lists cloud-only users but not onmicrosoft or guests" {
+    $findings = Get-AkDirectoryAlignmentFinding `
+        -AdUser @() `
+        -CloudUser @(
+            (New-TestCloudUser -Upn "hire@x.com" -Name "New Hire"),
+            (New-TestCloudUser -Upn "breakglass@t.onmicrosoft.com"),
+            (New-TestCloudUser -Upn "guest@x.com" -Type "Guest")
+        ) -VerifiedDomain @("x.com")
+    $cloudOnly = @($findings | Where-Object { $_.Check -eq "CloudUserNotInAd" })
+    $cloudOnly.Count -eq 1 -and $cloudOnly[0].AffectedObject -eq "hire@x.com"
+}
+
+Test-Case -Name "Alignment flags two cloud accounts resolving to one display name" {
+    # tjstone in AD matched cloud tjstone, while cloud tstone with the same
+    # display name has no AD account: one person, two cloud identities.
+    $findings = Get-AkDirectoryAlignmentFinding `
+        -AdUser @(New-TestAdUser -Sam "tjstone" -Upn "tjstone@x.com" -Name "Terry Stone") `
+        -CloudUser @(
+            (New-TestCloudUser -Upn "tjstone@x.com" -Name "Terry Stone"),
+            (New-TestCloudUser -Upn "tstone@x.com" -Name "Terry Stone")
+        ) -VerifiedDomain @("x.com")
+    @($findings | Where-Object { $_.Check -eq "AmbiguousNameMatch" -and $_.AffectedObject -eq "tstone@x.com" }).Count -eq 1
+}
+
+Test-Case -Name "Alignment flags malformed and unverified-domain proxy entries" {
+    $ad = New-TestAdUser -Sam "a" -Upn "a@x.com" -Proxies @("o=Exchange", "SMTP:a@x.com", "smtp:a@old.example")
+    $findings = Get-AkDirectoryAlignmentFinding -AdUser @($ad) -CloudUser @(New-TestCloudUser -Upn "a@x.com") -VerifiedDomain @("x.com")
+    @($findings | Where-Object { $_.Check -eq "MalformedProxyAddress" -and $_.Value -eq "o=Exchange" }).Count -eq 1 -and
+    @($findings | Where-Object { $_.Check -eq "AdProxyOnUnverifiedDomain" -and $_.Value -eq "smtp:a@old.example" }).Count -eq 1
+}
+
+Test-Case -Name "Alignment returns an array for empty input" {
+    $findings = Get-AkDirectoryAlignmentFinding -AdUser @() -CloudUser @()
+    $findings.Count -eq 1 -and $findings[0].Check -eq "MatchedPairs"
 }
 
 Write-Host ""

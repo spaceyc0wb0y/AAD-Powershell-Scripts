@@ -1061,6 +1061,15 @@ function ConvertFrom-AkMultiValue {
     .SYNOPSIS
     Splits a semicolon delimited CSV field back into an array.
 
+    .DESCRIPTION
+    A value can itself contain semicolons: an X.400 proxy address is
+    'X400:c=US;a= ;p=Org;o=Exchange;s=Surname;g=Given', and a naive split
+    shredded one of those into seven proxyAddresses entries on import
+    (found 2026-08-28). ConvertTo-AkMultiValue therefore escapes ';' and '\'
+    inside values, and this function splits only on unescaped semicolons.
+    Packages written before the escaping contain no '\;' or '\\' sequences,
+    so they parse exactly as they always did.
+
     .PARAMETER Value
     Delimited string value.
     #>
@@ -1081,13 +1090,21 @@ function ConvertFrom-AkMultiValue {
         return ,@()
     }
 
-    return ,@($text.Split(";") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
+    # Split on ';' unless it is escaped. The doubled lookbehind keeps an
+    # escaped backslash followed by a real separator ('a\\;b') splitting.
+    $parts = [regex]::Split($text, '(?<!(?<!\\)\\);')
+
+    return ,@($parts |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { [regex]::Replace($_.Trim(), '\\([\\;])', '$1') })
 }
 
 function ConvertTo-AkMultiValue {
     <#
     .SYNOPSIS
-    Joins a multi valued attribute into a semicolon delimited CSV field.
+    Joins a multi valued attribute into a semicolon delimited CSV field,
+    escaping semicolons and backslashes inside each value so the field
+    splits back into the original values. See ConvertFrom-AkMultiValue.
 
     .PARAMETER Value
     Collection to join.
@@ -1102,7 +1119,9 @@ function ConvertTo-AkMultiValue {
         return ""
     }
 
-    return (@($Value) -join ";")
+    return (@($Value) | ForEach-Object {
+        ([string]$_ -replace '\\', '\\') -replace ';', '\;'
+    }) -join ";"
 }
 
 
@@ -2011,6 +2030,429 @@ function Get-AkEntraSyncPlan {
 }
 
 
+function Get-AkPrimarySmtp {
+    <#
+    .SYNOPSIS
+    Returns the primary SMTP address from proxyAddresses, or an empty string.
+
+    .DESCRIPTION
+    The primary entry is the one with an uppercase SMTP: prefix, so the match
+    must be case sensitive. Promoted from Set-AdUpnSuffix.ps1 so the Entra
+    alignment checks share it.
+
+    .PARAMETER ProxyAddresses
+    The proxyAddresses collection, or null.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        $ProxyAddresses
+    )
+
+    foreach ($proxy in @($ProxyAddresses)) {
+        $text = [string]$proxy
+        if ($text -cmatch "^SMTP:") {
+            return $text.Substring(5)
+        }
+    }
+
+    return ""
+}
+
+
+function Get-AkCsvColumnName {
+    <#
+    .SYNOPSIS
+    Finds a column by any of several candidate names, ignoring case and spaces.
+
+    .DESCRIPTION
+    The Entra portal user export has renamed its columns more than once, so
+    consumers pass every name a column has ever had. Promoted from
+    Set-AdUpnSuffix.ps1.
+
+    .PARAMETER Row
+    A sample row (any object with the export's properties), or null.
+
+    .PARAMETER Candidate
+    Column names to try, in order of preference.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][AllowNull()]$Row,
+        [Parameter(Mandatory)][string[]]$Candidate
+    )
+
+    if ($null -eq $Row) { return $null }
+
+    $names = @($Row.PSObject.Properties | ForEach-Object { $_.Name })
+    foreach ($wanted in $Candidate) {
+        $normalizedWanted = ($wanted -replace "[\s_]", "").ToLowerInvariant()
+        foreach ($name in $names) {
+            if (($name -replace "[\s_]", "").ToLowerInvariant() -eq $normalizedWanted) {
+                return $name
+            }
+        }
+    }
+
+    return $null
+}
+
+
+function Initialize-AkGraphDependency {
+    <#
+    .SYNOPSIS
+    Installs and imports Microsoft.Graph.Authentication so a script can call
+    Connect-MgGraph and Invoke-MgGraphRequest on a stock server.
+
+    .DESCRIPTION
+    Windows PowerShell 5.1 ships without the Graph SDK and often without the
+    NuGet package provider, and its default TLS settings cannot reach the
+    PowerShell Gallery. This puts all three right, per current user, without
+    needing local administrator rights:
+
+      1. Force TLS 1.2 for this session.
+      2. Install the NuGet package provider if it is missing.
+      3. Install Microsoft.Graph.Authentication (CurrentUser) if it is missing.
+      4. Import it.
+
+    Only Microsoft.Graph.Authentication is installed, deliberately: with it,
+    Invoke-MgGraphRequest can call any Graph endpoint, and the remaining forty
+    Microsoft.Graph.* modules add nothing but install time.
+
+    On a machine with no internet access this throws with instructions instead
+    of hanging: copy the module folder from a connected machine, or use the
+    calling script's offline CSV mode where it offers one.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $moduleName = "Microsoft.Graph.Authentication"
+
+    if (-not (Get-Module -ListAvailable -Name $moduleName)) {
+        Write-AkLog -Message "$moduleName is not installed. Installing for the current user from the PowerShell Gallery." -Level Step
+
+        # 5.1 defaults to TLS 1.0 outbound; the Gallery requires 1.2.
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor [System.Net.SecurityProtocolType]::Tls12
+
+        try {
+            if (-not (Get-PackageProvider -Name "NuGet" -ListAvailable -ErrorAction SilentlyContinue)) {
+                Write-AkLog -Message "Installing the NuGet package provider." -Level Info
+                Install-PackageProvider -Name "NuGet" -MinimumVersion "2.8.5.201" -Scope CurrentUser -Force | Out-Null
+            }
+            Install-Module -Name $moduleName -Scope CurrentUser -Repository PSGallery -Force -AllowClobber
+        }
+        catch {
+            throw "Could not install $moduleName from the PowerShell Gallery: $($_.Exception.Message). If this machine has no internet access, copy the module folder from a connected machine into `$HOME\Documents\WindowsPowerShell\Modules, or use the script's -TenantUserCsv offline mode."
+        }
+    }
+
+    Import-Module -Name $moduleName -ErrorAction Stop
+    $version = (Get-Module -Name $moduleName).Version
+    Write-AkLog -Message "$moduleName $version loaded." -Level Info
+}
+
+
+function Get-AkDirectoryAlignmentFinding {
+    <#
+    .SYNOPSIS
+    Compares AD users against Entra tenant users and returns the findings that
+    predict duplicates, dropped addresses, or blocked adoption when directory
+    synchronization is widened.
+
+    .DESCRIPTION
+    Pure comparison, no directory or network access, so the offline smoke
+    tests exercise every branch. Encodes the checks otherwise done by hand
+    before widening a sync scope onto an existing tenant:
+
+      AdUpnSuffixNotVerified   AD UPN suffix the tenant has not verified; the
+                               user syncs as .onmicrosoft.com and never
+                               soft-matches.
+      CloudUserStillDirSynced  The matching cloud user is still flagged as
+                               synced from some directory; adoption is blocked
+                               until it is converted to cloud-only.
+      RenamedInCloud           No cloud user holds this AD UPN, but one with
+                               the same display name holds a different UPN.
+                               Syncing now creates a duplicate person.
+      AdUserNotInCloud         Enabled AD user with no cloud counterpart; sync
+                               would create a brand-new cloud user.
+      AmbiguousNameMatch       A cloud user with no AD counterpart shares a
+                               display name with an AD user that matched a
+                               DIFFERENT cloud user - two cloud accounts for
+                               one person, or two people sharing a name.
+      CloudUserNotInAd         Cloud-only user with no AD account; the input
+                               list for Sync-EntraUsersToAd.ps1.
+      PrimarySmtpMismatch      Matched pair whose primary SMTP differs. On-prem
+                               masters the cloud after adoption, so this
+                               renames the mailbox.
+      CloudAliasMissingOnPrem  The cloud user holds an alias the AD object
+                               lacks; adoption strips it.
+      AdProxyOnUnverifiedDomain An on-prem address on a domain the tenant has
+                               not verified; Entra drops it silently.
+      MalformedProxyAddress    proxyAddresses entry with no scheme prefix -
+                               the X.400 shredding regression check.
+
+    .PARAMETER AdUser
+    AD users as objects with SamAccountName, UserPrincipalName, DisplayName,
+    Enabled, Mail, ProxyAddresses, DistinguishedName.
+
+    .PARAMETER CloudUser
+    Tenant users as objects with Id, DisplayName, UserPrincipalName,
+    AccountEnabled, UserType, OnPremisesSyncEnabled, ProxyAddresses, Mail.
+    Missing properties are tolerated.
+
+    .PARAMETER VerifiedDomain
+    Domains verified in the tenant. Empty skips the domain checks.
+
+    .PARAMETER HasCloudProxyData
+    The CloudUser objects carry real proxyAddresses. The portal CSV export
+    does not, so without this the SMTP and alias checks are skipped rather
+    than reporting every user as mismatched.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        $AdUser,
+
+        [AllowNull()]
+        $CloudUser,
+
+        [string[]]$VerifiedDomain = @(),
+
+        [switch]$HasCloudProxyData
+    )
+
+    $findings = New-Object System.Collections.Generic.List[object]
+
+    function Add-AlignmentFinding {
+        param(
+            [Parameter(Mandatory)][string]$Severity,
+            [Parameter(Mandatory)][string]$Check,
+            [Parameter(Mandatory)][string]$AffectedObject,
+            [string]$Attribute = "",
+            [string]$Value = "",
+            [Parameter(Mandatory)][string]$Finding,
+            [Parameter(Mandatory)][string]$Recommendation
+        )
+        $findings.Add([pscustomobject]@{
+            Severity       = $Severity
+            Check          = $Check
+            AffectedObject = $AffectedObject
+            Attribute      = $Attribute
+            Value          = $Value
+            Finding        = $Finding
+            Recommendation = $Recommendation
+        })
+    }
+
+    function Get-AddressDomain {
+        param([AllowEmptyString()][string]$Address)
+        if ($Address -like "*@*") {
+            return $Address.Substring($Address.LastIndexOf("@") + 1).ToLowerInvariant()
+        }
+        return ""
+    }
+
+    $verified = @($VerifiedDomain | ForEach-Object { $_.Trim().ToLowerInvariant() } | Where-Object { $_ })
+
+    # ------------------------------------------------------------------
+    # Index the tenant
+    # ------------------------------------------------------------------
+    $cloudByUpn = @{}
+    $cloudByName = @{}
+    foreach ($cloud in @($CloudUser)) {
+        $upn = [string](Get-AkPropertyValue -InputObject $cloud -Name "UserPrincipalName" -Default "")
+        if (-not [string]::IsNullOrWhiteSpace($upn)) {
+            $cloudByUpn[$upn.Trim().ToLowerInvariant()] = $cloud
+        }
+        $name = [string](Get-AkPropertyValue -InputObject $cloud -Name "DisplayName" -Default "")
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            $key = $name.Trim().ToLowerInvariant()
+            if (-not $cloudByName.ContainsKey($key)) { $cloudByName[$key] = New-Object System.Collections.Generic.List[object] }
+            $cloudByName[$key].Add($cloud)
+        }
+    }
+
+    $adUpnSet = @{}
+    $adByName = @{}
+    foreach ($ad in @($AdUser)) {
+        $upn = [string](Get-AkPropertyValue -InputObject $ad -Name "UserPrincipalName" -Default "")
+        if (-not [string]::IsNullOrWhiteSpace($upn)) { $adUpnSet[$upn.Trim().ToLowerInvariant()] = $ad }
+        $name = [string](Get-AkPropertyValue -InputObject $ad -Name "DisplayName" -Default "")
+        if (-not [string]::IsNullOrWhiteSpace($name)) {
+            $key = $name.Trim().ToLowerInvariant()
+            if (-not $adByName.ContainsKey($key)) { $adByName[$key] = $ad }
+        }
+    }
+
+    $matchedPairs = 0
+
+    # ------------------------------------------------------------------
+    # AD -> cloud
+    # ------------------------------------------------------------------
+    foreach ($ad in @($AdUser)) {
+        $sam = [string](Get-AkPropertyValue -InputObject $ad -Name "SamAccountName" -Default "")
+        $upn = [string](Get-AkPropertyValue -InputObject $ad -Name "UserPrincipalName" -Default "")
+        $displayName = [string](Get-AkPropertyValue -InputObject $ad -Name "DisplayName" -Default "")
+        $proxies = @(Get-AkPropertyValue -InputObject $ad -Name "ProxyAddresses" -Default @())
+
+        if ([string]::IsNullOrWhiteSpace($upn)) { continue }
+        $upnKey = $upn.Trim().ToLowerInvariant()
+        $upnSuffix = Get-AddressDomain -Address $upn
+
+        if ($verified.Count -gt 0 -and $upnSuffix -and ($verified -notcontains $upnSuffix)) {
+            Add-AlignmentFinding -Severity "Critical" -Check "AdUpnSuffixNotVerified" -AffectedObject $sam `
+                -Attribute "userPrincipalName" -Value $upn `
+                -Finding "UPN suffix '@$upnSuffix' is not verified in the tenant." `
+                -Recommendation "The user would sync as .onmicrosoft.com and never soft-match. Verify the domain in the tenant or move the user to a verified suffix."
+        }
+
+        $cloud = $null
+        if ($cloudByUpn.ContainsKey($upnKey)) { $cloud = $cloudByUpn[$upnKey] }
+
+        if ($null -ne $cloud) {
+            $matchedPairs++
+
+            if (ConvertTo-AkBoolean -Value (Get-AkPropertyValue -InputObject $cloud -Name "OnPremisesSyncEnabled") -Default $false) {
+                Add-AlignmentFinding -Severity "Critical" -Check "CloudUserStillDirSynced" -AffectedObject $sam `
+                    -Attribute "onPremisesSyncEnabled" -Value $upn `
+                    -Finding "The matching cloud user is still flagged as directory-synced." `
+                    -Recommendation "Soft match cannot adopt a synced object. Remove it from the old sync scope and let it convert to cloud-only before widening this sync."
+            }
+
+            if ($HasCloudProxyData) {
+                $adPrimary = Get-AkPrimarySmtp -ProxyAddresses $proxies
+                $cloudProxies = @(Get-AkPropertyValue -InputObject $cloud -Name "ProxyAddresses" -Default @())
+                $cloudPrimary = Get-AkPrimarySmtp -ProxyAddresses $cloudProxies
+                if ([string]::IsNullOrWhiteSpace($cloudPrimary)) {
+                    $cloudPrimary = [string](Get-AkPropertyValue -InputObject $cloud -Name "Mail" -Default "")
+                }
+
+                if ($adPrimary -and $cloudPrimary -and ($adPrimary.ToLowerInvariant() -ne $cloudPrimary.ToLowerInvariant())) {
+                    Add-AlignmentFinding -Severity "Medium" -Check "PrimarySmtpMismatch" -AffectedObject $sam `
+                        -Attribute "proxyAddresses" -Value "$adPrimary -> $cloudPrimary" `
+                        -Finding "On-prem primary SMTP '$adPrimary' differs from cloud primary '$cloudPrimary'." `
+                        -Recommendation "On-prem masters the cloud after adoption, so syncing renames the mailbox. Align the on-prem primary with the cloud one first."
+                }
+
+                # Cloud aliases the AD object lacks are stripped when the
+                # on-prem attribute becomes authoritative. onmicrosoft.com
+                # entries are tenant-managed and excluded.
+                $adAddressSet = @{}
+                foreach ($proxy in $proxies) {
+                    $text = [string]$proxy
+                    if ($text -match "^(?i)smtp:") { $adAddressSet[$text.Substring(5).ToLowerInvariant()] = $true }
+                }
+                foreach ($proxy in $cloudProxies) {
+                    $text = [string]$proxy
+                    if ($text -notmatch "^(?i)smtp:") { continue }
+                    $address = $text.Substring(5)
+                    $domain = Get-AddressDomain -Address $address
+                    if ($domain -like "*.onmicrosoft.com") { continue }
+                    if (-not $adAddressSet.ContainsKey($address.ToLowerInvariant())) {
+                        Add-AlignmentFinding -Severity "Medium" -Check "CloudAliasMissingOnPrem" -AffectedObject $sam `
+                            -Attribute "proxyAddresses" -Value $address `
+                            -Finding "Cloud address '$address' is absent from the AD object." `
+                            -Recommendation "Adoption strips it. Add it on-prem as an smtp: entry (SMTP: if it is the primary) before enabling sync."
+                    }
+                }
+            }
+        }
+        else {
+            $renamed = $null
+            if ($displayName) {
+                $nameKey = $displayName.Trim().ToLowerInvariant()
+                if ($cloudByName.ContainsKey($nameKey)) { $renamed = $cloudByName[$nameKey][0] }
+            }
+
+            if ($null -ne $renamed) {
+                $cloudUpn = [string](Get-AkPropertyValue -InputObject $renamed -Name "UserPrincipalName" -Default "")
+                Add-AlignmentFinding -Severity "High" -Check "RenamedInCloud" -AffectedObject $sam `
+                    -Attribute "userPrincipalName" -Value "$upn -> $cloudUpn" `
+                    -Finding "No cloud user holds '$upn', but '$displayName' exists in the cloud as '$cloudUpn'." `
+                    -Recommendation "Syncing now creates a duplicate person. Change the AD UPN (and primary SMTP) to match the cloud value before widening the scope."
+            }
+            else {
+                Add-AlignmentFinding -Severity "Medium" -Check "AdUserNotInCloud" -AffectedObject $sam `
+                    -Attribute "userPrincipalName" -Value $upn `
+                    -Finding "No cloud user matches '$upn'. Sync would create a new cloud account." `
+                    -Recommendation "Intended for a genuinely new user. Otherwise keep the account out of the sync scope, or disable it if the person has left."
+            }
+        }
+
+        foreach ($proxy in $proxies) {
+            $text = [string]$proxy
+            if ($text -notmatch "^[A-Za-z][A-Za-z0-9]*:") {
+                Add-AlignmentFinding -Severity "Medium" -Check "MalformedProxyAddress" -AffectedObject $sam `
+                    -Attribute "proxyAddresses" -Value $text `
+                    -Finding "proxyAddresses entry '$text' has no scheme prefix." `
+                    -Recommendation "Usually a shredded X.400 address from a semicolon-split import. Remove it; Entra rejects malformed entries."
+                continue
+            }
+            if ($verified.Count -gt 0 -and $text -match "^(?i)smtp:") {
+                $domain = Get-AddressDomain -Address $text.Substring(5)
+                if ($domain -and ($verified -notcontains $domain) -and ($domain -notlike "*.onmicrosoft.com")) {
+                    Add-AlignmentFinding -Severity "Medium" -Check "AdProxyOnUnverifiedDomain" -AffectedObject $sam `
+                        -Attribute "proxyAddresses" -Value $text `
+                        -Finding "Address domain '@$domain' is not verified in the tenant." `
+                        -Recommendation "Entra silently drops addresses on unverified domains. Remove the entry, or verify the domain if it is still in use."
+                }
+            }
+        }
+    }
+
+    # ------------------------------------------------------------------
+    # Cloud -> AD
+    # ------------------------------------------------------------------
+    foreach ($cloud in @($CloudUser)) {
+        $upn = [string](Get-AkPropertyValue -InputObject $cloud -Name "UserPrincipalName" -Default "")
+        if ([string]::IsNullOrWhiteSpace($upn)) { continue }
+        $upnKey = $upn.Trim().ToLowerInvariant()
+        $suffix = Get-AddressDomain -Address $upn
+
+        # onmicrosoft accounts (break-glass admins, service identities) and
+        # guests are never provisioned into AD.
+        if ($suffix -like "*.onmicrosoft.com") { continue }
+        $userType = [string](Get-AkPropertyValue -InputObject $cloud -Name "UserType" -Default "Member")
+        if ($userType -and $userType -ne "Member") { continue }
+        if ($adUpnSet.ContainsKey($upnKey)) { continue }
+
+        $displayName = [string](Get-AkPropertyValue -InputObject $cloud -Name "DisplayName" -Default "")
+
+        $adTwin = $null
+        if ($displayName) {
+            $nameKey = $displayName.Trim().ToLowerInvariant()
+            if ($adByName.ContainsKey($nameKey)) { $adTwin = $adByName[$nameKey] }
+        }
+
+        if ($null -ne $adTwin) {
+            $twinUpn = [string](Get-AkPropertyValue -InputObject $adTwin -Name "UserPrincipalName" -Default "")
+            $twinKey = $twinUpn.Trim().ToLowerInvariant()
+            if ($twinUpn -and $cloudByUpn.ContainsKey($twinKey)) {
+                # The AD account with this person's name already matched a
+                # DIFFERENT cloud user, so the name exists in the cloud twice.
+                Add-AlignmentFinding -Severity "High" -Check "AmbiguousNameMatch" -AffectedObject $upn `
+                    -Attribute "displayName" -Value $displayName `
+                    -Finding "Cloud user '$upn' has no AD account, but AD user '$twinUpn' with the same display name matched a different cloud user." `
+                    -Recommendation "Either one person has two cloud accounts (delete or exclude one) or two people share a name (rename one for clarity). Resolve before provisioning."
+                continue
+            }
+        }
+
+        Add-AlignmentFinding -Severity "Info" -Check "CloudUserNotInAd" -AffectedObject $upn `
+            -Attribute "userPrincipalName" -Value $displayName `
+            -Finding "Cloud user has no AD account." `
+            -Recommendation "Candidate for Sync-EntraUsersToAd.ps1 if the person needs shares or GPOs; otherwise nothing to do."
+    }
+
+    Add-AlignmentFinding -Severity "Info" -Check "MatchedPairs" -AffectedObject "(summary)" `
+        -Value ([string]$matchedPairs) `
+        -Finding "$matchedPairs AD user(s) match a cloud user by UPN and will soft-match on sync." `
+        -Recommendation "No action. This is the adoption population."
+
+    return ,@($findings.ToArray())
+}
+
+
 Export-ModuleMember -Function @(
     "Get-AkPackageLayout",
     "Get-AkPackageItemPath",
@@ -2051,5 +2493,9 @@ Export-ModuleMember -Function @(
     "Get-AkEntraAttributeMap",
     "Test-AkEntraSyncCandidate",
     "Get-AkEntraAttributeDelta",
-    "Get-AkEntraSyncPlan"
+    "Get-AkEntraSyncPlan",
+    "Get-AkPrimarySmtp",
+    "Get-AkCsvColumnName",
+    "Initialize-AkGraphDependency",
+    "Get-AkDirectoryAlignmentFinding"
 )

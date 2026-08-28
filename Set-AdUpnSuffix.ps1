@@ -133,55 +133,6 @@ if ($Server) { $adParams["Server"] = $Server }
 if ($Credential) { $adParams["Credential"] = $Credential }
 
 
-function Get-CsvColumnName {
-    <#
-    .SYNOPSIS
-    Finds a column by any of several candidate names, ignoring case and spaces.
-    The Entra portal export has renamed its columns more than once.
-    #>
-    param(
-        [Parameter(Mandatory)][AllowNull()]$Row,
-        [Parameter(Mandatory)][string[]]$Candidate
-    )
-
-    if ($null -eq $Row) { return $null }
-
-    $names = @($Row.PSObject.Properties | ForEach-Object { $_.Name })
-    foreach ($wanted in $Candidate) {
-        $normalizedWanted = ($wanted -replace "[\s_]", "").ToLowerInvariant()
-        foreach ($name in $names) {
-            if (($name -replace "[\s_]", "").ToLowerInvariant() -eq $normalizedWanted) {
-                return $name
-            }
-        }
-    }
-
-    return $null
-}
-
-
-function Get-PrimarySmtp {
-    <#
-    .SYNOPSIS
-    Returns the primary SMTP address from proxyAddresses, or an empty string.
-    The primary entry is the one with an uppercase SMTP: prefix, so the match
-    must be case sensitive.
-    #>
-    param(
-        [AllowNull()]$ProxyAddresses
-    )
-
-    foreach ($proxy in @($ProxyAddresses)) {
-        $text = [string]$proxy
-        if ($text -cmatch "^SMTP:") {
-            return $text.Substring(5)
-        }
-    }
-
-    return ""
-}
-
-
 function Get-TenantIndex {
     <#
     .SYNOPSIS
@@ -196,7 +147,7 @@ function Get-TenantIndex {
         throw "Tenant export '$Path' contains no rows."
     }
 
-    $upnColumn = Get-CsvColumnName -Row $rows[0] -Candidate @(
+    $upnColumn = Get-AkCsvColumnName -Row $rows[0] -Candidate @(
         "userPrincipalName", "User principal name", "UPN", "SignInName"
     )
     if (-not $upnColumn) {
@@ -205,7 +156,7 @@ function Get-TenantIndex {
 
     # Absent from some export vintages. When it is missing every matched object
     # is classified Unknown, which forces a human decision rather than guessing.
-    $syncColumn = Get-CsvColumnName -Row $rows[0] -Candidate @(
+    $syncColumn = Get-AkCsvColumnName -Row $rows[0] -Candidate @(
         "directorySynced", "dirSyncEnabled", "onPremisesSyncEnabled",
         "Directory synced", "On-premises sync enabled"
     )
@@ -329,7 +280,7 @@ function Invoke-PlanMode {
         $currentUpn = [string](Get-AkPropertyValue -InputObject $user -Name "UserPrincipalName" -Default "")
         $mail = [string](Get-AkPropertyValue -InputObject $user -Name "mail" -Default "")
         $proxies = @(Get-AkPropertyValue -InputObject $user -Name "proxyAddresses" -Default @())
-        $primarySmtp = Get-PrimarySmtp -ProxyAddresses $proxies
+        $primarySmtp = Get-AkPrimarySmtp -ProxyAddresses $proxies
 
         $currentSuffix = ""
         $currentPrefix = ""

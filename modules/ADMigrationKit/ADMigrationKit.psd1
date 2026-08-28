@@ -47,7 +47,11 @@
         'Get-AkEntraAttributeMap',
         'Test-AkEntraSyncCandidate',
         'Get-AkEntraAttributeDelta',
-        'Get-AkEntraSyncPlan'
+        'Get-AkEntraSyncPlan',
+        'Get-AkPrimarySmtp',
+        'Get-AkCsvColumnName',
+        'Initialize-AkGraphDependency',
+        'Get-AkDirectoryAlignmentFinding'
     )
     CmdletsToExport   = @()
     VariablesToExport = @()
