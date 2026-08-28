@@ -291,7 +291,7 @@ try {
     $sorted = @($findings | Sort-Object -Property @{ Expression = { $severityRank[$_.Severity] }; Descending = $true }, Check, AffectedObject)
 
     $resultPath = Join-Path -Path $OutputPath -ChildPath "EntraAdAlignment-$timestamp.csv"
-    Export-AkCsv -InputObject $sorted -Path $resultPath
+    [void](Export-AkCsv -InputObject $sorted -Path $resultPath)
 
     Write-Host ""
     Write-Host "===============================================================" -ForegroundColor Cyan

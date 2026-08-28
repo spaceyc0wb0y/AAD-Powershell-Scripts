@@ -378,7 +378,7 @@ function Invoke-PlanMode {
         }
     }
 
-    Export-AkCsv -InputObject $rows -Path $planPath
+    [void](Export-AkCsv -InputObject $rows -Path $planPath)
 
     $changeCount = @($rows | Where-Object { $_.Action -eq "Change" }).Count
     $reviewCount = @($rows | Where-Object { $_.Action -eq "Review" }).Count
@@ -488,7 +488,7 @@ function Invoke-ApplyMode {
     }
 
     $resultPath = Join-Path -Path $OutputPath -ChildPath "upn-apply-$timestamp.csv"
-    Export-AkCsv -InputObject $results -Path $resultPath
+    [void](Export-AkCsv -InputObject $results -Path $resultPath)
 
     Write-Host ""
     Write-AkLog -Message "Changed: $changed   Skipped: $skipped   Failed: $failed" -Level Info
