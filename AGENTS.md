@@ -15,6 +15,7 @@ Test-EntraAdAlignment.ps1       AD vs Entra tenant cross-check before widening s
 Set-AdUpnSuffix.ps1             Add a routable UPN suffix and reassign user UPNs
 Get-EntraMfaDiagnostics.ps1     Multi-tenant Entra MFA reporting/remediation
 Sync-EntraUsersToAd.ps1         Scheduled Entra cloud-only user provisioning into AD
+New-ProfileMigrationKit.ps1     ForensiT Profwiz deployment kit + local-profile inventory
 modules/ADMigrationKit/         Shared helpers and the export package schema
 tests/Invoke-SmokeTests.ps1     Offline parser check plus helper unit tests
 docs/MIGRATION-RUNBOOK.md       Step-by-step cross-domain rebuild procedure

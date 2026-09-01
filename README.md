@@ -18,6 +18,7 @@ and run it against the directory in front of you.
 | `New-AdPrincipalMap.ps1` | Builds the reviewable old-to-new principal mapping that drives a rebuild. | Writes one CSV |
 | `Import-AdEnvironment.ps1` | Rebuilds an exported environment in a **new domain with a new name**, with no trust or connectivity to the old one. | **Writes to AD** |
 | `Sync-EntraUsersToAd.ps1` | Provisions cloud-only Entra users into an on-premises OU on a schedule, so they can reach shares and printers. | **Writes to AD** |
+| `New-ProfileMigrationKit.ps1` | Builds a ForensiT User Profile Wizard deployment kit (merged Profwiz.config, rename lookup, RMM/startup script) plus a which-profiles-are-local-only inventory. Bring your own licensed Profwiz.exe. | Writes the kit folder |
 | `Get-EntraMfaDiagnostics.ps1` | Multi-tenant Entra MFA reporting and optional per-user MFA remediation. | Optional writes |
 
 Shared logic lives in `modules/ADMigrationKit`. Offline tests are in

@@ -2032,6 +2032,70 @@ function Get-AkEntraSyncPlan {
 }
 
 
+function Update-AkProfwizConfig {
+    <#
+    .SYNOPSIS
+    Writes a Profwiz.config for ForensiT User Profile Wizard by merging
+    settings into the vendor's own template file.
+
+    .DESCRIPTION
+    Profwiz.config's root element and full schema are the vendor's to change,
+    and the file ships alongside Profwiz.exe in every ForensiT download. So
+    this never fabricates the file: it loads the shipped template, replaces
+    the values of the elements it is given (matched by element name anywhere
+    in the document), and saves the result. An element the template does not
+    contain is an error, not a silent skip - that is either a typo or a
+    schema change worth knowing about.
+
+    .PARAMETER TemplatePath
+    The Profwiz.config that ships with User Profile Wizard.
+
+    .PARAMETER OutputPath
+    Where to write the merged config.
+
+    .PARAMETER Setting
+    Element name to value map, for example @{ Domain = "ad.contoso.com" }.
+    Values are written as element text; booleans should be passed as the
+    strings "True" or "False", matching the file's own convention.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$TemplatePath,
+
+        [Parameter(Mandatory)]
+        [string]$OutputPath,
+
+        [Parameter(Mandatory)]
+        [hashtable]$Setting
+    )
+
+    if (-not (Test-Path -LiteralPath $TemplatePath)) {
+        throw "Profwiz.config template '$TemplatePath' does not exist."
+    }
+
+    $xml = New-Object System.Xml.XmlDocument
+    $xml.PreserveWhitespace = $true
+    $xml.Load((Resolve-Path -LiteralPath $TemplatePath).Path)
+
+    $missing = @()
+    foreach ($key in @($Setting.Keys | Sort-Object)) {
+        $node = $xml.SelectSingleNode("//*[local-name()='$key']")
+        if ($null -eq $node) {
+            $missing += $key
+            continue
+        }
+        $node.InnerText = [string]$Setting[$key]
+    }
+
+    if ($missing.Count -gt 0) {
+        throw "Template '$TemplatePath' has no element(s): $($missing -join ', '). Is this the Profwiz.config that ships with User Profile Wizard?"
+    }
+
+    $xml.Save($OutputPath)
+}
+
+
 function Get-AkPrintbrmArgument {
     <#
     .SYNOPSIS
@@ -2603,6 +2667,7 @@ Export-ModuleMember -Function @(
     "Get-AkCsvColumnName",
     "Get-AkPrintbrmArgument",
     "Invoke-AkPrintbrm",
+    "Update-AkProfwizConfig",
     "Initialize-AkGraphDependency",
     "Get-AkDirectoryAlignmentFinding"
 )

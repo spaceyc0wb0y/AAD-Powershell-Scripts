@@ -52,6 +52,7 @@
         'Get-AkCsvColumnName',
         'Get-AkPrintbrmArgument',
         'Invoke-AkPrintbrm',
+        'Update-AkProfwizConfig',
         'Initialize-AkGraphDependency',
         'Get-AkDirectoryAlignmentFinding'
     )

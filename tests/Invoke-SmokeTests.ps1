@@ -973,6 +973,55 @@ Test-Case -Name "Alignment returns an array for empty input" {
     $findings.Count -eq 1 -and $findings[0].Check -eq "MatchedPairs"
 }
 
+Test-Case -Name "Update-AkProfwizConfig merges values into the vendor template" {
+    $template = Join-Path -Path $env:TEMP -ChildPath "ak-test-profwiz.config"
+    $merged = Join-Path -Path $env:TEMP -ChildPath "ak-test-profwiz-out.config"
+    try {
+        Set-Content -LiteralPath $template -Encoding ASCII -Value @(
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            '<!-- ForensiT User Profile Wizard run options -->',
+            '<Profwiz.config>',
+            '  <Domain></Domain>',
+            '  <OldDomain></OldDomain>',
+            '  <Silent>False</Silent>',
+            '  <RemoveAdmins>False</RemoveAdmins>',
+            '</Profwiz.config>'
+        )
+        Update-AkProfwizConfig -TemplatePath $template -OutputPath $merged -Setting @{
+            Domain = "ad.new.example"; OldDomain = "OLDCORP"; Silent = "True"
+        }
+        $xml = [xml](Get-Content -LiteralPath $merged -Raw)
+        $xml.'Profwiz.config'.Domain -eq "ad.new.example" -and
+        $xml.'Profwiz.config'.OldDomain -eq "OLDCORP" -and
+        $xml.'Profwiz.config'.Silent -eq "True" -and
+        $xml.'Profwiz.config'.RemoveAdmins -eq "False"
+    }
+    finally {
+        Remove-Item -LiteralPath $template, $merged -Force -ErrorAction SilentlyContinue
+    }
+}
+
+Test-Case -Name "Update-AkProfwizConfig refuses an element the template lacks" {
+    $template = Join-Path -Path $env:TEMP -ChildPath "ak-test-profwiz2.config"
+    $merged = Join-Path -Path $env:TEMP -ChildPath "ak-test-profwiz2-out.config"
+    try {
+        Set-Content -LiteralPath $template -Encoding ASCII -Value @(
+            '<Profwiz.config><Domain></Domain></Profwiz.config>'
+        )
+        $threw = $false
+        try {
+            Update-AkProfwizConfig -TemplatePath $template -OutputPath $merged -Setting @{ NoSuchElement = "x" }
+        }
+        catch {
+            $threw = $_.Exception.Message -like "*NoSuchElement*"
+        }
+        $threw
+    }
+    finally {
+        Remove-Item -LiteralPath $template, $merged -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Test-Case -Name "Get-AkPrintbrmArgument builds a local backup" {
     (Get-AkPrintbrmArgument -Mode Backup -FilePath "C:\pkg\ps1.printerExport") -join " " -eq "-b -f C:\pkg\ps1.printerExport"
 }

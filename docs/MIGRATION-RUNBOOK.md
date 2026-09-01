@@ -206,6 +206,18 @@ offenders, in rough order of frequency:
 Fix each in the Group Policy Management Console, then re-run the Validate phase
 until it is clean or every remaining hit is understood and accepted.
 
+### Workstation profiles
+
+Rejoining a workstation gives every user a new SID and an empty profile.
+`New-ProfileMigrationKit.ps1` prepares the fix: it merges this migration's
+specifics (domains, renamed accounts, exclusions) into ForensiT User Profile
+Wizard's own Profwiz.config, generates the RMM/startup migration script, and
+inventories which profiles are roaming versus local-only so you know whose
+data exists nowhere but their machine. Profwiz re-points the existing profile
+at the new domain account in place - nothing is copied. Bring your own
+licensed Profwiz.exe (Corporate Edition for silent deployment); pilot one
+workstation and read its Migrate.log before touching the fleet.
+
 ### Print server migration
 
 The print service itself (queues, drivers with their binaries, ports, print
