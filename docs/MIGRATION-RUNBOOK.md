@@ -206,6 +206,25 @@ offenders, in rough order of frequency:
 Fix each in the Group Policy Management Console, then re-run the Validate phase
 until it is clean or every remaining hit is understood and accepted.
 
+### Print server migration
+
+The print service itself (queues, drivers with their binaries, ports, print
+processors) moves with Printbrm, wrapped as an opt-in section and phase:
+
+```powershell
+# On the OLD side - or run the export on the print server itself:
+.\Export-AdEnvironment.ps1 -OutputPath D:\Migration -PrintServer PRINT01
+
+# Once the NEW print server exists, on that server:
+.\Import-AdEnvironment.ps1 -PackagePath <package> -Phase Printers -WhatIf
+.\Import-AdEnvironment.ps1 -PackagePath <package> -Phase Printers
+```
+
+Neither side runs as part of All/-Include All, because Printbrm.exe comes with
+the Print Management tools and a plain DC has no print service worth touching.
+After the restore, re-point the deployed-printer GPOs (item 3 above) at the
+new server's UNC paths.
+
 ---
 
 ## Step 8 — Hybrid Entra

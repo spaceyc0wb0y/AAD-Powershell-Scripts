@@ -84,6 +84,16 @@ Hashtable mapping old local share roots to new ones on this server, for example
 .PARAMETER CreateMissingShareFolders
 Create share target folders that do not exist yet.
 
+.PARAMETER TargetPrintServer
+Print server the Printers phase restores onto. Omit to restore on the local
+machine - the reliable choice is running this phase ON the new print server.
+The Printers phase is never part of -Phase All; run it by name once that
+server exists: -Phase Printers.
+
+.PARAMETER ReplaceExistingPrinters
+Printers phase: overwrite queues that already exist on the target
+(Printbrm -o force) instead of skipping them.
+
 .PARAMETER SkipExisting
 Skip objects that already exist in the target rather than reporting them as
 errors. On by default, which makes the whole import safely re-runnable.
@@ -109,7 +119,7 @@ param(
 
     [string]$PrincipalMapPath,
 
-    [ValidateSet("All", "OrganizationalUnits", "Groups", "Users", "Membership", "WmiFilters", "Gpo", "GpoLinks", "Shares", "Validate")]
+    [ValidateSet("All", "OrganizationalUnits", "Groups", "Users", "Membership", "WmiFilters", "Gpo", "GpoLinks", "Shares", "Printers", "Validate")]
     [string[]]$Phase = @("All"),
 
     [string]$Server,
@@ -133,6 +143,10 @@ param(
 
     [switch]$CreateMissingShareFolders,
 
+    [string]$TargetPrintServer,
+
+    [switch]$ReplaceExistingPrinters,
+
     [bool]$SkipExisting = $true
 )
 
@@ -147,9 +161,13 @@ if (-not [string]::IsNullOrWhiteSpace($Server)) { $adParams["Server"] = $Server 
 if ($Credential) { $adParams["Credential"] = $Credential }
 
 # Phases always execute in dependency order, never in the order the caller typed.
-$phaseOrder = @("OrganizationalUnits", "Groups", "Users", "Membership", "WmiFilters", "Gpo", "GpoLinks", "Shares", "Validate")
+# Printers, like the export side, is NOT part of "All": it needs Printbrm.exe
+# and a package that actually carries a print backup. Request it by name.
+$phaseOrder = @("OrganizationalUnits", "Groups", "Users", "Membership", "WmiFilters", "Gpo", "GpoLinks", "Shares", "Printers", "Validate")
 $requested = @($Phase)
-$activePhases = @($phaseOrder | Where-Object { $requested -contains "All" -or $requested -contains $_ })
+$activePhases = @($phaseOrder | Where-Object {
+    ($requested -contains $_) -or ($requested -contains "All" -and $_ -ne "Printers")
+})
 
 function Test-Phase {
     param([Parameter(Mandatory)][string]$Name)
@@ -1541,6 +1559,51 @@ if (Test-Phase -Name "Shares") {
     }
 
     Write-AkLog -Message "Share phase complete." -Level Success
+}
+
+# ===========================================================================
+# Phase: Printers
+# ===========================================================================
+# Replays the .printerExport backups Export-AdEnvironment.ps1 took with
+# Printbrm - queues, drivers (binaries included), ports, and processors.
+# Not part of "All": run it by name once the new print server exists, from
+# that server if possible, or point -TargetPrintServer at it.
+
+if (Test-Phase -Name "Printers") {
+    Write-Host ""
+    Write-AkLog -Message "PHASE: Printers" -Level Step
+
+    $printersFolder = Get-AkPackageItemPath -PackagePath $PackagePath -Item PrintersFolder
+    $exportFiles = @()
+    if (Test-Path -LiteralPath $printersFolder) {
+        $exportFiles = @(Get-ChildItem -Path $printersFolder -Filter "*.printerExport" -File)
+    }
+
+    if ($exportFiles.Count -eq 0) {
+        Write-AkLog -Message "The package has no .printerExport files. Re-run the export with -PrintServer <server>, or take one by hand: Printbrm.exe -b -f backup.printerExport on the old print server." -Level Warning
+    }
+    else {
+        $targetLabel = $env:COMPUTERNAME
+        if (-not [string]::IsNullOrWhiteSpace($TargetPrintServer)) { $targetLabel = $TargetPrintServer }
+
+        foreach ($exportFile in $exportFiles) {
+            if (-not $PSCmdlet.ShouldProcess($targetLabel, "Restore print queues and drivers from '$($exportFile.Name)'")) {
+                continue
+            }
+
+            $brmArgs = if ([string]::IsNullOrWhiteSpace($TargetPrintServer)) {
+                Get-AkPrintbrmArgument -Mode Restore -FilePath $exportFile.FullName -Force:$ReplaceExistingPrinters
+            }
+            else {
+                Get-AkPrintbrmArgument -Mode Restore -FilePath $exportFile.FullName -Server $TargetPrintServer -Force:$ReplaceExistingPrinters
+            }
+            Invoke-AkPrintbrm -Argument $brmArgs
+            Write-AkLog -Message "Restored print backup '$($exportFile.Name)' onto $targetLabel." -Level Success
+        }
+
+        Write-AkLog -Message "Printer phase complete. Check queues in Print Management; drivers restore per-architecture, and a queue whose driver failed lands with a warning in the Printbrm output above." -Level Info
+        Write-AkLog -Message "Shared queues deployed by GPO still need those GPOs re-pointed at $targetLabel." -Level Info
+    }
 }
 
 # ===========================================================================

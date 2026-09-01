@@ -39,6 +39,8 @@ $script:PackageLayout = @{
     Shares                  = "files\shares.csv"
     ShareAccess             = "files\share-access.csv"
     NtfsAcl                 = "files\ntfs-acl.csv"
+    PrintersFolder          = "printers"
+    PrinterInventory        = "printers\printers.csv"
     LogFolder               = "logs"
     ImportFolder            = "import"
     PrincipalMap            = "import\principal-map.csv"
@@ -2030,6 +2032,109 @@ function Get-AkEntraSyncPlan {
 }
 
 
+function Get-AkPrintbrmArgument {
+    <#
+    .SYNOPSIS
+    Builds the argument list for a Printbrm.exe backup or restore.
+
+    .DESCRIPTION
+    Printbrm is the supported way to move print queues WITH their drivers,
+    ports, and processors between servers. Kept as a pure builder so the
+    offline tests can pin the exact arguments; Invoke-AkPrintbrm runs them.
+
+    .PARAMETER Mode
+    Backup writes a .printerExport file; Restore replays one.
+
+    .PARAMETER FilePath
+    The .printerExport file to write or read.
+
+    .PARAMETER Server
+    Remote print server to operate against (\\name is added). Omit to act on
+    the local machine, which is the reliable choice: run backup ON the old
+    print server and restore ON the new one where you can.
+
+    .PARAMETER Force
+    Restore only: overwrite queues that already exist on the target.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet("Backup", "Restore")]
+        [string]$Mode,
+
+        [Parameter(Mandatory)]
+        [string]$FilePath,
+
+        [string]$Server,
+
+        [switch]$Force
+    )
+
+    $arguments = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($Server)) {
+        $arguments.Add("-s")
+        $arguments.Add("\\" + $Server.Trim().TrimStart("\"))
+    }
+    if ($Mode -eq "Backup") {
+        $arguments.Add("-b")
+    }
+    else {
+        $arguments.Add("-r")
+        if ($Force) {
+            # -o force replaces an existing queue instead of skipping it.
+            $arguments.Add("-o")
+            $arguments.Add("force")
+        }
+    }
+    $arguments.Add("-f")
+    $arguments.Add($FilePath)
+
+    return ,@($arguments.ToArray())
+}
+
+
+function Invoke-AkPrintbrm {
+    <#
+    .SYNOPSIS
+    Runs Printbrm.exe with the given backup or restore arguments and throws
+    on failure.
+
+    .DESCRIPTION
+    Printbrm.exe ships with the Print Management tools
+    (%SystemRoot%\System32\Spool\Tools). Its output is streamed into the log,
+    because Printbrm reports per-queue and per-driver problems only on
+    stdout, and a driver that failed to restore is exactly what you need to
+    know about.
+
+    .PARAMETER Argument
+    Argument list from Get-AkPrintbrmArgument.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Argument
+    )
+
+    $printbrm = Join-Path -Path $env:SystemRoot -ChildPath "System32\Spool\Tools\Printbrm.exe"
+    if (-not (Test-Path -LiteralPath $printbrm)) {
+        throw "Printbrm.exe was not found at $printbrm. Install the Print Management tools (RSAT-Print-Services) or run this on a machine with the Print Server role."
+    }
+
+    Write-AkLog -Message "Printbrm $($Argument -join ' ')" -Level Info
+    $output = & $printbrm @Argument 2>&1
+    foreach ($line in @($output)) {
+        $text = [string]$line
+        if (-not [string]::IsNullOrWhiteSpace($text)) {
+            Write-AkLog -Message "  $text" -Level Info
+        }
+    }
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "Printbrm.exe exited with code $LASTEXITCODE. Read its output above; a locked spooler or an in-use driver is the usual cause."
+    }
+}
+
+
 function Get-AkPrimarySmtp {
     <#
     .SYNOPSIS
@@ -2496,6 +2601,8 @@ Export-ModuleMember -Function @(
     "Get-AkEntraSyncPlan",
     "Get-AkPrimarySmtp",
     "Get-AkCsvColumnName",
+    "Get-AkPrintbrmArgument",
+    "Invoke-AkPrintbrm",
     "Initialize-AkGraphDependency",
     "Get-AkDirectoryAlignmentFinding"
 )

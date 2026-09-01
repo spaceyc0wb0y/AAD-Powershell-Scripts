@@ -973,6 +973,19 @@ Test-Case -Name "Alignment returns an array for empty input" {
     $findings.Count -eq 1 -and $findings[0].Check -eq "MatchedPairs"
 }
 
+Test-Case -Name "Get-AkPrintbrmArgument builds a local backup" {
+    (Get-AkPrintbrmArgument -Mode Backup -FilePath "C:\pkg\ps1.printerExport") -join " " -eq "-b -f C:\pkg\ps1.printerExport"
+}
+
+Test-Case -Name "Get-AkPrintbrmArgument targets a remote server and normalizes the name" {
+    (Get-AkPrintbrmArgument -Mode Backup -FilePath "C:\x.printerExport" -Server "\\PRINT01") -join " " -eq "-s \\PRINT01 -b -f C:\x.printerExport"
+}
+
+Test-Case -Name "Get-AkPrintbrmArgument restore honours Force and its absence" {
+    ((Get-AkPrintbrmArgument -Mode Restore -FilePath "C:\x.printerExport" -Force) -join " ") -eq "-r -o force -f C:\x.printerExport" -and
+    ((Get-AkPrintbrmArgument -Mode Restore -FilePath "C:\x.printerExport") -join " ") -eq "-r -f C:\x.printerExport"
+}
+
 Write-Host ""
 Write-Host "=== Result ===" -ForegroundColor Cyan
 Write-Host "Passed: $script:Passed" -ForegroundColor Green

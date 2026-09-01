@@ -36,7 +36,10 @@ Optional credentials for reading the source domain.
 Parent folder in which the timestamped package folder is created.
 
 .PARAMETER Include
-Sections to export. Defaults to All.
+Sections to export. Defaults to All. The Printers section is the exception:
+it is never part of All, because it needs Printbrm.exe (the Print Management
+tools) and a plain DC usually has neither that nor a print service worth
+backing up. Ask for it with -Include Printers or by naming a -PrintServer.
 
 .PARAMETER SearchBase
 Optional distinguished name to limit the user, group, computer, and OU export to
@@ -45,6 +48,14 @@ one subtree. GPO export is not affected by this.
 .PARAMETER FileServer
 One or more servers whose SMB shares and NTFS ACLs should be captured. Defaults
 to the local computer when the Shares section is included.
+
+.PARAMETER PrintServer
+One or more print servers to back up with Printbrm.exe - queues, drivers
+(binaries included), ports, and print processors land in one .printerExport
+file per server inside the package. Naming a server implies the Printers
+section. Remote backup needs RPC to the remote spooler; if that fails, run
+the export ON the print server (any section subset works, e.g.
+-Include Printers) and copy the file into the main package's printers folder.
 
 .PARAMETER ExcludeSharePath
 Share names to skip when capturing shares. Administrative shares, SYSVOL, and
@@ -84,12 +95,14 @@ param(
 
     [string]$OutputPath = (Join-Path -Path (Get-Location) -ChildPath "AdExport"),
 
-    [ValidateSet("All", "Domain", "OrganizationalUnits", "Users", "Groups", "Computers", "Gpo", "Shares")]
+    [ValidateSet("All", "Domain", "OrganizationalUnits", "Users", "Groups", "Computers", "Gpo", "Shares", "Printers")]
     [string[]]$Include = @("All"),
 
     [string]$SearchBase,
 
     [string[]]$FileServer,
+
+    [string[]]$PrintServer,
 
     [string[]]$ExcludeSharePath,
 
@@ -850,6 +863,78 @@ if (Test-Section -Name "Shares") {
     $counts["NtfsAccessRules"] = $aclRecords.Count
     $exportedSections.Add("Shares")
     Write-AkLog -Message "Shares exported: $($shareRecords.Count), share ACEs: $($shareAccessRecords.Count), NTFS ACEs: $($aclRecords.Count)" -Level Success
+}
+
+# ---------------------------------------------------------------------------
+# Section: Print queues and drivers
+# ---------------------------------------------------------------------------
+
+# Unlike every other section, Printers is NOT part of "All": it needs
+# Printbrm.exe (Print Management tools), which a plain DC usually lacks, and
+# a default export must not start failing over an optional feature. Ask for
+# it with -Include Printers, or just name a -PrintServer.
+if (($sectionsRequested -contains "Printers") -or (@($PrintServer).Count -gt 0)) {
+    Write-AkLog -Message "Exporting print queues and drivers..." -Level Step
+
+    $printServers = @($PrintServer)
+    if ($printServers.Count -eq 0) {
+        $printServers = @($env:COMPUTERNAME)
+        Write-AkLog -Message "No -PrintServer specified. Backing up the print service on $env:COMPUTERNAME only." -Level Warning
+    }
+
+    $printersFolder = Get-AkPackageItemPath -PackagePath $packagePath -Item PrintersFolder
+    New-Item -Path $printersFolder -ItemType Directory -Force | Out-Null
+
+    $printerRecords = New-Object System.Collections.Generic.List[object]
+    $backupCount = 0
+
+    foreach ($printServer in $printServers) {
+        $isLocal = ($printServer -eq $env:COMPUTERNAME -or $printServer -eq "." -or $printServer -eq "localhost")
+        $exportFile = Join-Path -Path $printersFolder -ChildPath ((Get-AkSafeName -Name $printServer) + ".printerExport")
+
+        # The .printerExport carries queues, drivers (binaries included),
+        # ports, and print processors - everything a fresh server needs.
+        # Remote backup needs RPC to the spooler; running ON the print
+        # server is the reliable path if this fails.
+        $brmArgs = if ($isLocal) {
+            Get-AkPrintbrmArgument -Mode Backup -FilePath $exportFile
+        }
+        else {
+            Get-AkPrintbrmArgument -Mode Backup -FilePath $exportFile -Server $printServer
+        }
+        Invoke-AkPrintbrm -Argument $brmArgs
+        $backupCount++
+        Write-AkLog -Message "Print service on $printServer backed up to $exportFile" -Level Success
+
+        # Best-effort inventory so the package documents what the backup
+        # holds without anyone mounting the .printerExport.
+        try {
+            $printerParams = @{}
+            if (-not $isLocal) { $printerParams["ComputerName"] = $printServer }
+            foreach ($printer in @(Get-Printer @printerParams -ErrorAction Stop)) {
+                $printerRecords.Add([pscustomobject]@{
+                    Server     = $printServer
+                    Name       = $printer.Name
+                    DriverName = [string](Get-AkPropertyValue -InputObject $printer -Name "DriverName")
+                    PortName   = [string](Get-AkPropertyValue -InputObject $printer -Name "PortName")
+                    Shared     = Get-AkPropertyValue -InputObject $printer -Name "Shared" -Default $false
+                    ShareName  = [string](Get-AkPropertyValue -InputObject $printer -Name "ShareName")
+                    Location   = [string](Get-AkPropertyValue -InputObject $printer -Name "Location")
+                    Comment    = [string](Get-AkPropertyValue -InputObject $printer -Name "Comment")
+                })
+            }
+        }
+        catch {
+            Write-AkLog -Message "Could not inventory printers on ${printServer}: $($_.Exception.Message). The .printerExport backup itself succeeded." -Level Warning
+        }
+    }
+
+    [void](Export-AkCsv -InputObject $printerRecords.ToArray() -Path (Get-AkPackageItemPath -PackagePath $packagePath -Item PrinterInventory))
+
+    $counts["PrintServerBackups"] = $backupCount
+    $counts["Printers"] = $printerRecords.Count
+    $exportedSections.Add("Printers")
+    Write-AkLog -Message "Print server backups: $backupCount, printers inventoried: $($printerRecords.Count)" -Level Success
 }
 
 # ---------------------------------------------------------------------------

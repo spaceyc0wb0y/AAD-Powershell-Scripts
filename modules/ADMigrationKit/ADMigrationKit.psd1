@@ -50,6 +50,8 @@
         'Get-AkEntraSyncPlan',
         'Get-AkPrimarySmtp',
         'Get-AkCsvColumnName',
+        'Get-AkPrintbrmArgument',
+        'Invoke-AkPrintbrm',
         'Initialize-AkGraphDependency',
         'Get-AkDirectoryAlignmentFinding'
     )
